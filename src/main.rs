@@ -124,15 +124,121 @@ fn compare_dirs(left: &Path, right: &Path) -> Vec<Diff> {
 
 
 
+use std::fs::{OpenOptions};
+use std::io::Write;
+use std::collections::VecDeque;
+
+#[derive(Debug, Clone)]
+enum SyncAction {
+    CopyLeftToRight(String),
+    CopyRightToLeft(String),
+    DeleteLeft(String),
+    DeleteRight(String),
+    Conflict(String),
+    NoOp(String),
+}
+
+#[derive(Debug, Clone)]
+struct SyncLogEntry {
+    action: SyncAction,
+    timestamp: SystemTime,
+    details: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SyncLog {
+    entries: Vec<SyncLogEntry>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SyncState {
+    last_synced: Option<SystemTime>,
+    // Could store hashes, timestamps, etc for smarter conflict detection
+}
+
+fn plan_sync_actions(diffs: &[Diff], sync_mode: &str) -> Vec<SyncAction> {
+    // Placeholder: build sync actions based on diffs and sync_mode
+    diffs.iter().map(|diff| match &diff.diff_type {
+        DiffType::OnlyInLeft => SyncAction::CopyLeftToRight(diff.path.clone()),
+        DiffType::OnlyInRight => SyncAction::CopyRightToLeft(diff.path.clone()),
+        DiffType::Different { .. } => SyncAction::CopyLeftToRight(diff.path.clone()), // Example policy
+    }).collect()
+}
+
+fn log_sync_action(log: &mut SyncLog, action: &SyncAction, details: &str) {
+    log.entries.push(SyncLogEntry {
+        action: action.clone(),
+        timestamp: SystemTime::now(),
+        details: details.to_string(),
+    });
+}
+
+fn save_sync_log(log: &SyncLog, path: &Path) {
+    let log_path = path.join(".sync-log.txt");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        for entry in &log.entries {
+            let _ = writeln!(file, "{:?} at {:?}: {}", entry.action, entry.timestamp, entry.details);
+        }
+    }
+}
+
+fn save_sync_state(state: &SyncState, path: &Path) {
+    // Placeholder: serialize state to disk
+    let _ = std::fs::write(path.join(".sync-state.json"), "{}\n");
+}
+
+fn rollback(log: &SyncLog, left: &Path, right: &Path) {
+    // Placeholder: undo actions based on log
+    println!("[ROLLBACK] Would undo {} actions", log.entries.len());
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: {} <dir1> <dir2>", args[0]);
+    if args.len() < 3 {
+        eprintln!("Usage: {} <dir1> <dir2> [--sync <mode>] [--dry-run] [--rollback]", args[0]);
         std::process::exit(1);
     }
     let left = Path::new(&args[1]);
     let right = Path::new(&args[2]);
+    let mut sync_mode = "none";
+    let mut dry_run = false;
+    let mut do_rollback = false;
+    for arg in &args[3..] {
+        match arg.as_str() {
+            "--sync" => sync_mode = "one-way", // placeholder, could parse next arg
+            "--dry-run" => dry_run = true,
+            "--rollback" => do_rollback = true,
+            _ => {}
+        }
+    }
+
     let diffs = compare_dirs(left, right);
+    if do_rollback {
+        // Load log and rollback
+        let log = SyncLog::default(); // Placeholder: load from disk
+        rollback(&log, left, right);
+        return;
+    }
+    if sync_mode != "none" {
+        let actions = plan_sync_actions(&diffs, sync_mode);
+        let mut log = SyncLog::default();
+        println!("Planned sync actions:");
+        for action in &actions {
+            println!("  {:?}", action);
+        }
+        if dry_run {
+            println!("[DRY RUN] No changes made.");
+        } else {
+            // Placeholder: execute actions, log each
+            for action in &actions {
+                log_sync_action(&mut log, action, "executed");
+            }
+            save_sync_log(&log, left);
+            save_sync_state(&SyncState::default(), left);
+            println!("Sync complete. Log and state saved.");
+        }
+        return;
+    }
     if diffs.is_empty() {
         println!("No differences found.");
     } else {
@@ -174,3 +280,4 @@ fn main() {
         }
     }
 }
+
