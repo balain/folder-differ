@@ -1,5 +1,6 @@
 use std::env;
 use std::fs::{self, File, Metadata};
+use std::sync::atomic::AtomicUsize;
 use std::path::Path;
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
@@ -315,25 +316,94 @@ fn rollback(log: &SyncLog, left: &Path, right: &Path) {
     }
 }
 
+fn run_synthetic_benchmark() {
+    use std::time::Instant;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use indicatif::ProgressBar;
+
+    let root = Path::new("/tmp/folder-differ-bench");
+    let n_dirs = 100;
+    let n_files_per_dir = 100;
+    let file_size = 4096;
+
+    // Clean up any previous benchmark tree
+    let _ = fs::remove_dir_all(root);
+    fs::create_dir_all(root).unwrap();
+    for d in 0..n_dirs {
+        let dir = root.join(format!("dir{:03}", d));
+        fs::create_dir_all(&dir).unwrap();
+        for f in 0..n_files_per_dir {
+            let file = dir.join(format!("file{:03}.bin", f));
+            std::fs::write(&file, vec![b'x'; file_size]).unwrap();
+        }
+    }
+    println!("Synthetic tree created: {} dirs, {} files, {} bytes each", n_dirs, n_dirs * n_files_per_dir, file_size);
+    let file_count = Arc::new(AtomicUsize::new(0));
+    let dir_count = Arc::new(AtomicUsize::new(0));
+    let active_tasks = Arc::new(AtomicUsize::new(1));
+    let max_tasks = Arc::new(AtomicUsize::new(1));
+    let pb = ProgressBar::hidden();
+    let start = Instant::now();
+    count_files_dirs(root, &file_count, &dir_count, &pb, &active_tasks, &max_tasks);
+    let elapsed = start.elapsed();
+    println!("Scan complete: files={}, dirs={}, time={:?}, max_parallel_tasks={}",
+        file_count.load(Ordering::SeqCst),
+        dir_count.load(Ordering::SeqCst),
+        elapsed,
+        max_tasks.load(Ordering::SeqCst));
+    let _ = fs::remove_dir_all(root);
+    println!("Synthetic benchmark finished and cleaned up.");
+}
+
+fn count_files_dirs(root: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_count: &std::sync::Arc<AtomicUsize>, pb: &indicatif::ProgressBar, active_tasks: &std::sync::Arc<std::sync::atomic::AtomicUsize>, max_tasks: &std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::Ordering;
+    use std::fs;
+    if let Ok(entries) = fs::read_dir(root) {
+        let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        rayon::scope(|s| {
+            for entry in &entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    dir_count.fetch_add(1, Ordering::SeqCst);
+                    pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(Ordering::SeqCst), file_count.load(Ordering::SeqCst)));
+                    let file_count = std::sync::Arc::clone(file_count);
+                    let dir_count = std::sync::Arc::clone(dir_count);
+                    let pb = pb.clone();
+                    let active_tasks = std::sync::Arc::clone(active_tasks);
+                    let max_tasks = std::sync::Arc::clone(max_tasks);
+                    s.spawn(move |_| {
+                        let cur = active_tasks.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_tasks.fetch_max(cur, Ordering::SeqCst);
+                        count_files_dirs(&path, &file_count, &dir_count, &pb, &active_tasks, &max_tasks);
+                        active_tasks.fetch_sub(1, Ordering::SeqCst);
+                    });
+                } else {
+                    file_count.fetch_add(1, Ordering::SeqCst);
+                    pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(Ordering::SeqCst), file_count.load(Ordering::SeqCst)));
+                }
+            }
+        });
+    }
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
+    if args.contains(&"--synthetic-benchmark".to_string()) {
+        run_synthetic_benchmark();
+        return;
+    }
     if args.len() < 3 {
-        eprintln!("Usage: {} <dir1> <dir2> [--sync <mode>] [--dry-run] [--rollback]", args[0]);
+        eprintln!("Usage: {} <left_dir> <right_dir> [--sync] [--dry-run] [--rollback] [--synthetic-benchmark]", args[0]);
         std::process::exit(1);
     }
     let left = Path::new(&args[1]);
     let right = Path::new(&args[2]);
-    let mut sync_mode = "none";
-    let mut dry_run = false;
-    let mut do_rollback = false;
-    for arg in &args[3..] {
-        match arg.as_str() {
-            "--sync" => sync_mode = "one-way", // placeholder, could parse next arg
-            "--dry-run" => dry_run = true,
-            "--rollback" => do_rollback = true,
-            _ => {}
-        }
-    }
+    let do_sync = args.contains(&"--sync".to_string());
+    let dry_run = args.contains(&"--dry-run".to_string());
+    let do_rollback = args.contains(&"--rollback".to_string());
 
     use std::time::Instant;
     use indicatif::{ProgressBar, ProgressStyle, ProgressDrawTarget};
@@ -348,33 +418,16 @@ fn main() {
     let right_file_count = std::sync::Arc::new(AtomicUsize::new(0));
     let right_dir_count = std::sync::Arc::new(AtomicUsize::new(0));
 
-    fn count_files_dirs(root: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_count: &std::sync::Arc<AtomicUsize>, pb: &ProgressBar) {
-        if let Ok(entries) = fs::read_dir(root) {
-            let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            rayon::scope(|s| {
-                for entry in &entries {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        dir_count.fetch_add(1, Ordering::SeqCst);
-                        pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(Ordering::SeqCst), file_count.load(Ordering::SeqCst)));
-                        let file_count = std::sync::Arc::clone(file_count);
-                        let dir_count = std::sync::Arc::clone(dir_count);
-                        let pb = pb.clone();
-                        s.spawn(move |_| {
-                            count_files_dirs(&path, &file_count, &dir_count, &pb);
-                        });
-                    } else {
-                        file_count.fetch_add(1, Ordering::SeqCst);
-                        pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(Ordering::SeqCst), file_count.load(Ordering::SeqCst)));
-                    }
-                }
-            });
-        }
-    }
+    let left_active_tasks = std::sync::Arc::new(AtomicUsize::new(1));
+    let left_max_tasks = std::sync::Arc::new(AtomicUsize::new(1));
+    let right_active_tasks = std::sync::Arc::new(AtomicUsize::new(1));
+    let right_max_tasks = std::sync::Arc::new(AtomicUsize::new(1));
     rayon::join(
-        || count_files_dirs(left, &left_file_count, &left_dir_count, &count_pb),
-        || count_files_dirs(right, &right_file_count, &right_dir_count, &count_pb),
+        || count_files_dirs(left, &left_file_count, &left_dir_count, &count_pb, &left_active_tasks, &left_max_tasks),
+        || count_files_dirs(right, &right_file_count, &right_dir_count, &count_pb, &right_active_tasks, &right_max_tasks),
     );
+    eprintln!("[DIAG] Max parallel tasks (left): {}", left_max_tasks.load(Ordering::SeqCst));
+    eprintln!("[DIAG] Max parallel tasks (right): {}", right_max_tasks.load(Ordering::SeqCst));
     let file_total = left_file_count.load(Ordering::SeqCst) + right_file_count.load(Ordering::SeqCst);
     let dir_total = left_dir_count.load(Ordering::SeqCst) + right_dir_count.load(Ordering::SeqCst);
     count_pb.finish_with_message("Counting complete");
@@ -389,45 +442,39 @@ fn main() {
     let left_scan_dir_count = std::sync::Arc::new(AtomicUsize::new(0));
     let right_scan_file_count = std::sync::Arc::new(AtomicUsize::new(0));
     let right_scan_dir_count = std::sync::Arc::new(AtomicUsize::new(0));
+
     fn get_dir_files_progress(root: &Path, base: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_count: &std::sync::Arc<AtomicUsize>, pb: &ProgressBar) -> HashMap<String, Metadata> {
-        use std::sync::{Arc, Mutex};
         let mut files = HashMap::new();
         if let Ok(entries) = fs::read_dir(root) {
             let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            let sub_maps = Arc::new(Mutex::new(Vec::new()));
-            rayon::scope(|s| {
-                for entry in &entries {
-                    let path = entry.path();
-                    let rel_path = path.strip_prefix(base).unwrap().to_string_lossy().to_string();
-                    if path.is_dir() {
-                        dir_count.fetch_add(1, Ordering::SeqCst);
-                        pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(Ordering::SeqCst), file_count.load(Ordering::SeqCst)));
-                        pb.set_position((dir_count.load(Ordering::SeqCst) + file_count.load(Ordering::SeqCst)) as u64);
-                        let file_count = Arc::clone(file_count);
-                        let dir_count = Arc::clone(dir_count);
-                        let pb = pb.clone();
-                        let base = base.to_path_buf();
-                        let sub_maps = Arc::clone(&sub_maps);
-                        s.spawn(move |_| {
-                            let map = get_dir_files_progress(&path, &base, &file_count, &dir_count, &pb);
-                            sub_maps.lock().unwrap().push(map);
-                        });
+            let sub_maps: Vec<HashMap<String, Metadata>> = entries.par_iter().map(|entry| {
+                let path = entry.path();
+                let rel_path = path.strip_prefix(base).unwrap().to_string_lossy().to_string();
+                if path.is_dir() {
+                    dir_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(std::sync::atomic::Ordering::SeqCst), file_count.load(std::sync::atomic::Ordering::SeqCst)));
+                    pb.set_position((dir_count.load(std::sync::atomic::Ordering::SeqCst) + file_count.load(std::sync::atomic::Ordering::SeqCst)) as u64);
+                    get_dir_files_progress(&path, base, file_count, dir_count, pb)
+                } else {
+                    if let Ok(meta) = entry.metadata() {
+                        file_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(std::sync::atomic::Ordering::SeqCst), file_count.load(std::sync::atomic::Ordering::SeqCst)));
+                        pb.set_position((dir_count.load(std::sync::atomic::Ordering::SeqCst) + file_count.load(std::sync::atomic::Ordering::SeqCst)) as u64);
+                        let mut m = HashMap::new();
+                        m.insert(rel_path, meta);
+                        m
                     } else {
-                        if let Ok(meta) = entry.metadata() {
-                            file_count.fetch_add(1, Ordering::SeqCst);
-                            pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(Ordering::SeqCst), file_count.load(Ordering::SeqCst)));
-                            pb.set_position((dir_count.load(Ordering::SeqCst) + file_count.load(Ordering::SeqCst)) as u64);
-                            files.insert(rel_path, meta);
-                        }
+                        HashMap::new()
                     }
                 }
-            });
-            for map in sub_maps.lock().unwrap().drain(..) {
+            }).collect();
+            for map in sub_maps {
                 files.extend(map);
             }
         }
         files
     }
+
     let (left_files, right_files) = rayon::join(
         || get_dir_files_progress(left, left, &left_scan_file_count, &left_scan_dir_count, &scan_pb),
         || get_dir_files_progress(right, right, &right_scan_file_count, &right_scan_dir_count, &scan_pb),
@@ -511,40 +558,11 @@ fn main() {
         rollback(&log, left, right);
         return;
     }
-    if sync_mode != "none" {
-        let actions = plan_sync_actions(&diffs, sync_mode);
-        println!("Planned sync actions:");
-        for action in &actions {
-            println!("  {:?}", action);
-        }
-        if dry_run {
-            println!("[DRY RUN] No changes made.");
-        } else {
-            // Parallel execution of sync actions
-            use std::sync::{Arc, Mutex};
-            use indicatif::{ProgressBar, ProgressStyle};
-            let log = Arc::new(Mutex::new(SyncLog::default()));
-            let pb = Arc::new(ProgressBar::with_draw_target(Some(actions.len() as u64), indicatif::ProgressDrawTarget::stderr()));
-            pb.set_style(ProgressStyle::with_template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}").unwrap());
-            actions.par_iter().for_each(|action| {
-                let mut thread_log = SyncLog::default();
-                perform_sync_action(action, left, right, &mut thread_log);
-                let mut main_log = log.lock().unwrap();
-                main_log.entries.extend(thread_log.entries);
-                pb.inc(1);
-            });
-            pb.finish_with_message("Done");
-            let log = Arc::try_unwrap(log).unwrap().into_inner().unwrap();
-            save_sync_log(&log, left);
-            save_sync_state(&SyncState::default(), left);
-            println!("Sync complete. Log and state saved.");
-        }
-        println!("Scan duration: {:.2?}", scan_duration);
-        println!("Files scanned: {}", total_files);
-        println!("Differences found: {}", num_diffs);
-        println!("Percent changed: {:.2}%", percent_changed);
-        return;
-    }
+    println!("Scan duration: {:.2?}", scan_duration);
+    println!("Files scanned: {}", total_files);
+    println!("Differences found: {}", num_diffs);
+    println!("Percent changed: {:.2}%", percent_changed);
+
     if diffs.is_empty() {
         println!("No differences found.");
     } else {
