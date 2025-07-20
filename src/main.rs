@@ -46,7 +46,7 @@ fn hash_file(path: &Path) -> Option<Vec<u8>> {
     let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
+    let mut buffer = [0u8; 32768]; // Increased buffer size for better I/O performance
     loop {
         let n = reader.read(&mut buffer).ok()?;
         if n == 0 { break; }
@@ -473,9 +473,19 @@ fn main() {
         || get_dir_files_progress(right, right, &right_scan_file_count, &right_scan_dir_count, &scan_pb),
     );
     scan_pb.finish_with_message("Scan complete");
+    println!("About to start diff calculation...");
     let diffs: Vec<Diff> = {
         let all_paths: HashSet<_> = left_files.keys().chain(right_files.keys()).collect();
-        all_paths.iter().filter_map(|path| {
+        let processed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let total_files = all_paths.len();
+        println!("Processing {} files in parallel...", total_files);
+        
+        all_paths.par_iter().filter_map(|path| {
+            let count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count % 1000 == 0 {
+                print!("\rProcessed {} / {} files ({:.1}%)", count, total_files, (count as f64 / total_files as f64) * 100.0);
+                std::io::stdout().flush().unwrap();
+            }
             match (left_files.get(*path), right_files.get(*path)) {
                 (Some(left_meta), Some(right_meta)) => {
                     let left_size = left_meta.len();
@@ -488,7 +498,7 @@ fn main() {
                             diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
                         })
                     } else if left_time != right_time {
-                        // Hash and compare
+                        // Only hash if sizes are the same but times differ
                         let left_hash = hash_file(&left.join(*path));
                         let right_hash = hash_file(&right.join(*path));
                         if left_hash != right_hash {
@@ -500,6 +510,7 @@ fn main() {
                             None
                         }
                     } else {
+                        // Same size and time - assume identical, skip hashing
                         None
                     }
                 }
@@ -556,46 +567,19 @@ fn main() {
     println!("Differences found: {}", num_diffs);
     println!("Percent changed: {:.2}%", percent_changed);
 
+    println!("About to print diffs...");
     if diffs.is_empty() {
         println!("No differences found.");
     } else {
         println!("Differences:");
-        for diff in diffs {
-            match &diff.diff_type {
-                DiffType::Different { left_size, right_size, left_time, right_time } => {
-                    let newer = match (left_time, right_time) {
-                        (Some(lt), Some(rt)) => {
-                            if lt > rt {
-                                "left is newer"
-                            } else if rt > lt {
-                                "right is newer"
-                            } else {
-                                "same time"
-                            }
-                        },
-                        _ => "unknown",
-                    };
-                    let larger = if left_size > right_size {
-                        "left is larger"
-                    } else if right_size > left_size {
-                        "right is larger"
-                    } else {
-                        "same size"
-                    };
-                    println!(
-                        "Different: {}\n  left:  size={}  time={:?}\n  right: size={}  time={:?}\n  {} | {}",
-                        diff.path, left_size, left_time, right_size, right_time, newer, larger
-                    );
-                }
-                DiffType::OnlyInLeft => {
-                    println!("Only in left: {}", diff.path);
-                }
-                DiffType::OnlyInRight => {
-                    println!("Only in right: {}", diff.path);
-                }
-            }
+        for diff in diffs.iter().take(10) {
+            println!("Diff: {:?}", diff);
+        }
+        if diffs.len() > 10 {
+            println!("...and {} more", diffs.len() - 10);
         }
     }
+    println!("Done printing diffs.");
     println!("Scan duration: {:.2?}", scan_duration);
     println!("Files scanned: {}", total_files);
     println!("Differences found: {}", num_diffs);
