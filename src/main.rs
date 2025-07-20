@@ -1,4 +1,3 @@
-use std::env;
 use std::fs::{self, File, Metadata};
 use std::sync::atomic::AtomicUsize;
 use std::path::Path;
