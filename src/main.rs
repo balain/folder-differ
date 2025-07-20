@@ -447,29 +447,23 @@ fn main() {
         let mut files = HashMap::new();
         if let Ok(entries) = fs::read_dir(root) {
             let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            let sub_maps: Vec<HashMap<String, Metadata>> = entries.par_iter().map(|entry| {
+            for entry in entries {
                 let path = entry.path();
                 let rel_path = path.strip_prefix(base).unwrap().to_string_lossy().to_string();
                 if path.is_dir() {
                     dir_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(std::sync::atomic::Ordering::SeqCst), file_count.load(std::sync::atomic::Ordering::SeqCst)));
                     pb.set_position((dir_count.load(std::sync::atomic::Ordering::SeqCst) + file_count.load(std::sync::atomic::Ordering::SeqCst)) as u64);
-                    get_dir_files_progress(&path, base, file_count, dir_count, pb)
+                    let sub_files = get_dir_files_progress(&path, base, file_count, dir_count, pb);
+                    files.extend(sub_files);
                 } else {
                     if let Ok(meta) = entry.metadata() {
                         file_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(std::sync::atomic::Ordering::SeqCst), file_count.load(std::sync::atomic::Ordering::SeqCst)));
                         pb.set_position((dir_count.load(std::sync::atomic::Ordering::SeqCst) + file_count.load(std::sync::atomic::Ordering::SeqCst)) as u64);
-                        let mut m = HashMap::new();
-                        m.insert(rel_path, meta);
-                        m
-                    } else {
-                        HashMap::new()
+                        files.insert(rel_path, meta);
                     }
                 }
-            }).collect();
-            for map in sub_maps {
-                files.extend(map);
             }
         }
         files
@@ -482,7 +476,7 @@ fn main() {
     scan_pb.finish_with_message("Scan complete");
     let diffs: Vec<Diff> = {
         let all_paths: HashSet<_> = left_files.keys().chain(right_files.keys()).collect();
-        all_paths.par_iter().filter_map(|path| {
+        all_paths.iter().filter_map(|path| {
             match (left_files.get(*path), right_files.get(*path)) {
                 (Some(left_meta), Some(right_meta)) => {
                     let left_size = left_meta.len();
