@@ -5,10 +5,11 @@ use std::path::Path;
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 use sha2::{Sha256, Digest};
-use std::io::{Read, BufReader};
+use std::io::{Read, BufReader, Write};
 use rayon::prelude::*;
 use xxhash_rust::xxh3::Xxh3;
 use memmap2::Mmap;
+use blake3;
 
 #[derive(Debug)]
 enum DiffType {
@@ -55,45 +56,41 @@ fn hash_file(path: &Path) -> Option<Vec<u8>> {
         return hash_small_file(path);
     }
     
-    // For large files, use memory mapping
+    // For large files, use memory mapping and BLAKE3 parallel hashing
     if file_size > 1024 * 1024 { // 1MB
-        return hash_large_file(path);
+        return hash_large_file_blake3(path);
     }
     
-    // For medium files, use buffered reading with xxHash
-    hash_medium_file(path)
+    // For medium files, use buffered reading with BLAKE3
+    hash_medium_file_blake3(path)
 }
 
 fn hash_small_file(path: &Path) -> Option<Vec<u8>> {
     let mut file = File::open(path).ok()?;
     let mut content = Vec::new();
     file.read_to_end(&mut content).ok()?;
-    
-    let mut hasher = Xxh3::new();
-    hasher.update(&content);
-    Some(hasher.digest().to_le_bytes().to_vec())
+    let hash = blake3::hash(&content);
+    Some(hash.as_bytes().to_vec())
 }
 
-fn hash_medium_file(path: &Path) -> Option<Vec<u8>> {
+fn hash_medium_file_blake3(path: &Path) -> Option<Vec<u8>> {
     let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
-    let mut hasher = Xxh3::new();
+    let mut hasher = blake3::Hasher::new();
     let mut buffer = [0u8; 32768];
-    
     loop {
         let n = reader.read(&mut buffer).ok()?;
         if n == 0 { break; }
         hasher.update(&buffer[..n]);
     }
-    Some(hasher.digest().to_le_bytes().to_vec())
+    Some(hasher.finalize().as_bytes().to_vec())
 }
 
-fn hash_large_file(path: &Path) -> Option<Vec<u8>> {
+fn hash_large_file_blake3(path: &Path) -> Option<Vec<u8>> {
     let file = File::open(path).ok()?;
     let mmap = unsafe { Mmap::map(&file).ok()? };
-    let mut hasher = Xxh3::new();
-    hasher.update(&mmap);
-    Some(hasher.digest().to_le_bytes().to_vec())
+    let hash = blake3::hash(&mmap);
+    Some(hash.as_bytes().to_vec())
 }
 
 fn compare_small_files(left_path: &Path, right_path: &Path) -> Option<bool> {
@@ -176,7 +173,6 @@ fn compare_dirs(left: &Path, right: &Path) -> Vec<Diff> {
 
 
 use std::fs::{OpenOptions};
-use std::io::Write;
 
 #[derive(Debug, Clone)]
 enum SyncAction {
@@ -530,37 +526,25 @@ fn main() {
         let processed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let total_files = all_paths.len();
         println!("Processing {} files in parallel...", total_files);
-        
-        // Process files in chunks for better parallelism control
         let chunk_size = 1000;
         let paths_vec: Vec<_> = all_paths.into_iter().collect();
-        
-        paths_vec.chunks(chunk_size).flat_map(|chunk| {
+        let result: Vec<Diff> = paths_vec.chunks(chunk_size).flat_map(|chunk| {
             chunk.par_iter().filter_map(|path| {
-                let count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                if count % 1000 == 0 {
-                    print!("\rProcessed {} / {} files ({:.1}%)", count, total_files, (count as f64 / total_files as f64) * 100.0);
-                    std::io::stdout().flush().unwrap();
-                }
-                
+                let _count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                // Only print from main thread after parallel phase
                 match (left_files.get(*path), right_files.get(*path)) {
                     (Some(left_meta), Some(right_meta)) => {
                         let left_size = left_meta.len();
                         let right_size = right_meta.len();
                         let left_time = left_meta.modified().ok();
                         let right_time = right_meta.modified().ok();
-                        
-                        // Early exit for size differences
                         if left_size != right_size {
                             return Some(Diff {
                                 path: (*path).clone(),
                                 diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
                             });
                         }
-                        
-                        // Early exit for time differences
                         if left_time != right_time {
-                            // For small files, compare content directly instead of hashing
                             if left_size < 1024 {
                                 let left_path = left.join(*path);
                                 let right_path = right.join(*path);
@@ -573,7 +557,6 @@ fn main() {
                                     }
                                 }
                             } else {
-                                // Hash and compare for larger files
                                 let left_hash = hash_file(&left.join(*path));
                                 let right_hash = hash_file(&right.join(*path));
                                 if left_hash != right_hash {
@@ -584,8 +567,6 @@ fn main() {
                                 }
                             }
                         }
-                        
-                        // Same size and time - assume identical
                         None
                     }
                     (Some(_), None) => {
@@ -603,9 +584,13 @@ fn main() {
                     (None, None) => None,
                 }
             }).collect::<Vec<_>>()
-        }).collect()
+        }).collect();
+        let processed = processed_count.load(std::sync::atomic::Ordering::SeqCst);
+        print!("\rProcessed {} / {} files ({:.1}%)\n", processed, total_files, (processed as f64 / total_files as f64) * 100.0);
+        std::io::stdout().flush().unwrap();
+        result
     };
-    println!("\nDiff calculation complete, about to print results...");
+    println!("Diff calculation complete, about to print results...");
     let scan_duration = scan_start.elapsed();
     let total_files: usize = {
         let mut left_files = HashSet::new();
