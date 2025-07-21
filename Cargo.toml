@@ -10,3 +10,6 @@ indicatif = "0.17"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memmap2 = "0.9"
 blake3 = "1.5"
+ignore = "0.4"
+rustc-hash = "1.1"
+num_cpus = "1.16"

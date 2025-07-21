@@ -2,14 +2,18 @@ use std::env;
 use std::fs::{self, File, Metadata};
 use std::sync::atomic::AtomicUsize;
 use std::path::Path;
-use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 use sha2::{Sha256, Digest};
-use std::io::{Read, BufReader, Write};
+use std::io::{Read, BufReader};
 use rayon::prelude::*;
-use xxhash_rust::xxh3::Xxh3;
 use memmap2::Mmap;
 use blake3;
+use ignore::{WalkBuilder, WalkState, DirEntry};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::time::Instant;
+use num_cpus;
 
 #[derive(Debug)]
 enum DiffType {
@@ -29,19 +33,24 @@ struct Diff {
     diff_type: DiffType,
 }
 
-fn get_dir_files(root: &Path, base: &Path, files: &mut HashMap<String, Metadata>) {
-    if let Ok(entries) = fs::read_dir(root) {
-        entries.filter_map(|e| e.ok()).for_each(|entry| {
+// Replace get_dir_files and related logic with ignore::WalkBuilder and FxHashMap/FxHashSet
+fn get_dir_files_with_ignore(root: &Path, files: &mut FxHashMap<String, Metadata>, ignore_patterns: &[String]) {
+    let mut builder = WalkBuilder::new(root);
+    for pat in ignore_patterns {
+        builder.add_ignore(pat);
+    }
+    let walker = builder.build();
+    for result in walker {
+        if let Ok(entry) = result {
             let path = entry.path();
-            let rel_path = path.strip_prefix(base).unwrap().to_string_lossy().to_string();
-            if path.is_dir() {
-                get_dir_files(&path, base, files);
-            } else {
+            if path.is_file() {
                 if let Ok(meta) = entry.metadata() {
-                    files.insert(rel_path, meta);
+                    if let Ok(rel_path) = path.strip_prefix(root) {
+                        files.insert(rel_path.to_string_lossy().to_string(), meta);
+                    }
                 }
             }
-        });
+        }
     }
 }
 
@@ -104,15 +113,15 @@ fn compare_small_files(left_path: &Path, right_path: &Path) -> Option<bool> {
 }
 
 fn compare_dirs(left: &Path, right: &Path) -> Vec<Diff> {
-    let mut left_files: HashMap<String, Metadata> = HashMap::new();
-    let mut right_files: HashMap<String, Metadata> = HashMap::new();
+    let mut left_files: FxHashMap<String, Metadata> = FxHashMap::default();
+    let mut right_files: FxHashMap<String, Metadata> = FxHashMap::default();
 
     rayon::join(
-        || get_dir_files(left, left, &mut left_files),
-        || get_dir_files(right, right, &mut right_files),
+        || get_dir_files_with_ignore(left, &mut left_files, &[]),
+        || get_dir_files_with_ignore(right, &mut right_files, &[]),
     );
 
-    let all_paths: HashSet<_> = left_files.keys().chain(right_files.keys()).collect();
+    let all_paths: FxHashSet<_> = left_files.keys().chain(right_files.keys()).collect();
     all_paths.par_iter().filter_map(|path| {
         match (left_files.get(*path), right_files.get(*path)) {
             (Some(left_meta), Some(right_meta)) => {
@@ -437,6 +446,38 @@ fn count_files_dirs(root: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_c
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Thread count CLI option
+    let mut thread_count: Option<usize> = None;
+    let mut left_dir_arg = None;
+    let mut right_dir_arg = None;
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--threads" && i + 1 < args.len() {
+            if let Ok(n) = args[i + 1].parse::<usize>() {
+                thread_count = Some(n);
+            }
+            i += 2;
+        } else if left_dir_arg.is_none() {
+            left_dir_arg = Some(args[i].clone());
+            i += 1;
+        } else if right_dir_arg.is_none() {
+            right_dir_arg = Some(args[i].clone());
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    let left_dir = left_dir_arg.expect("Missing left_dir argument");
+    let right_dir = right_dir_arg.expect("Missing right_dir argument");
+    let left = Path::new(&left_dir);
+    let right = Path::new(&right_dir);
+
+    // Sensible default: 2x logical CPUs for I/O bound
+    let default_threads = num_cpus::get() * 2;
+    let num_threads = thread_count.unwrap_or(default_threads);
+    rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global().unwrap();
+    eprintln!("[CONFIG] Using {} threads for Rayon pool", num_threads);
+
     if args.contains(&"--synthetic-benchmark".to_string()) {
         run_synthetic_benchmark();
         return;
@@ -445,13 +486,22 @@ fn main() {
         eprintln!("Usage: {} <left_dir> <right_dir> [--sync] [--dry-run] [--rollback] [--synthetic-benchmark]", args[0]);
         std::process::exit(1);
     }
-    let left = Path::new(&args[1]);
-    let right = Path::new(&args[2]);
     let do_sync = args.contains(&"--sync".to_string());
     let dry_run = args.contains(&"--dry-run".to_string());
     let do_rollback = args.contains(&"--rollback".to_string());
 
-    use std::time::Instant;
+    // Output file logic
+    let left_name = left.file_name().and_then(|n| n.to_str()).unwrap_or("left");
+    let right_name = right.file_name().and_then(|n| n.to_str()).unwrap_or("right");
+    let output_dir = Path::new("./output");
+    std::fs::create_dir_all(output_dir).ok();
+    let output_path = output_dir.join(format!("{}_vs_{}.txt", left_name, right_name));
+    let output_file = File::create(&output_path).expect("Failed to create output file");
+    let mut writer = BufWriter::new(output_file);
+
+    // Timing: start
+    let total_start = Instant::now();
+
     use indicatif::{ProgressBar, ProgressStyle, ProgressDrawTarget};
     let scan_start = Instant::now();
     // PHASE 1: Count files and directories (with progress bar)
@@ -479,6 +529,9 @@ fn main() {
     count_pb.finish_with_message("Counting complete");
     let scan_total = file_total + dir_total;
 
+    let phase1_time = scan_start.elapsed();
+    eprintln!("[BENCH] Phase 1 (counting) duration: {:.2?}", phase1_time);
+
     // PHASE 2: Scan with percent-complete progress bar
     let scan_pb = ProgressBar::with_draw_target(Some(scan_total as u64), ProgressDrawTarget::stderr());
     scan_pb.set_style(ProgressStyle::with_template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% {msg}")
@@ -489,8 +542,9 @@ fn main() {
     let right_scan_file_count = std::sync::Arc::new(AtomicUsize::new(0));
     let right_scan_dir_count = std::sync::Arc::new(AtomicUsize::new(0));
 
-    fn get_dir_files_progress(root: &Path, base: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_count: &std::sync::Arc<AtomicUsize>, pb: &ProgressBar) -> HashMap<String, Metadata> {
-        let mut files = HashMap::new();
+    let phase2_start = Instant::now();
+    fn get_dir_files_progress(root: &Path, base: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_count: &std::sync::Arc<AtomicUsize>, pb: &ProgressBar) -> FxHashMap<String, Metadata> {
+        let mut files = FxHashMap::default();
         if let Ok(entries) = fs::read_dir(root) {
             let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
             for entry in entries {
@@ -520,9 +574,13 @@ fn main() {
         || get_dir_files_progress(right, right, &right_scan_file_count, &right_scan_dir_count, &scan_pb),
     );
     scan_pb.finish_with_message("Scan complete");
+    let phase2_time = phase2_start.elapsed();
+    eprintln!("[BENCH] Phase 2 (scanning) duration: {:.2?}", phase2_time);
+
+    let phase3_start = Instant::now();
     println!("About to start diff calculation...");
     let diffs: Vec<Diff> = {
-        let all_paths: HashSet<_> = left_files.keys().chain(right_files.keys()).collect();
+        let all_paths: FxHashSet<_> = left_files.keys().chain(right_files.keys()).collect();
         let processed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let total_files = all_paths.len();
         println!("Processing {} files in parallel...", total_files);
@@ -531,7 +589,6 @@ fn main() {
         let result: Vec<Diff> = paths_vec.chunks(chunk_size).flat_map(|chunk| {
             chunk.par_iter().filter_map(|path| {
                 let _count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                // Only print from main thread after parallel phase
                 match (left_files.get(*path), right_files.get(*path)) {
                     (Some(left_meta), Some(right_meta)) => {
                         let left_size = left_meta.len();
@@ -590,64 +647,33 @@ fn main() {
         std::io::stdout().flush().unwrap();
         result
     };
-    println!("Diff calculation complete, about to print results...");
-    let scan_duration = scan_start.elapsed();
-    let total_files: usize = {
-        let mut left_files = HashSet::new();
-        let mut right_files = HashSet::new();
-        fn collect_file_names(root: &Path, base: &Path, files: &mut HashSet<String>) {
-            if let Ok(entries) = fs::read_dir(root) {
-                entries.filter_map(|e| e.ok()).for_each(|entry| {
-                    let path = entry.path();
-                    let rel_path = path.strip_prefix(base).unwrap().to_string_lossy().to_string();
-                    if path.is_dir() {
-                        collect_file_names(&path, base, files);
-                    } else {
-                        files.insert(rel_path);
-                    }
-                });
-            }
-        }
-        collect_file_names(left, left, &mut left_files);
-        collect_file_names(right, right, &mut right_files);
-        left_files.union(&right_files).count()
-    };
-    let num_diffs = diffs.len();
-    let percent_changed = if total_files > 0 {
-        (num_diffs as f64 / total_files as f64) * 100.0
-    } else { 0.0 };
+    let phase3_time = phase3_start.elapsed();
+    eprintln!("[BENCH] Phase 3 (diffing) duration: {:.2?}", phase3_time);
 
-    if do_rollback {
-        // Load log and rollback
-        let log = SyncLog::default(); // Placeholder: load from disk
-        rollback(&log, left, right);
-        return;
-    }
-    println!("Scan duration: {:.2?}", scan_duration);
-    println!("Files scanned: {}", total_files);
-    println!("Differences found: {}", num_diffs);
-    println!("Percent changed: {:.2}%", percent_changed);
+    let total_time = total_start.elapsed();
+    eprintln!("[BENCH] Total duration: {:.2?}", total_time);
 
-    println!("About to print diffs...");
+    // Output to file (buffered)
+    writeln!(writer, "Scan duration: {:.2?}", total_time).ok();
+    writeln!(writer, "Files scanned: {}", left_files.len() + right_files.len()).ok();
+    writeln!(writer, "Differences found: {}", diffs.len()).ok();
+    writeln!(writer, "").ok();
     let all_only_in_left = diffs.iter().all(|diff| matches!(diff.diff_type, DiffType::OnlyInLeft));
     if diffs.is_empty() {
-        println!("No differences found.");
+        writeln!(writer, "No differences found.").ok();
     } else if diffs.len() < 200 || all_only_in_left {
-        println!("Differences:");
+        writeln!(writer, "Differences:").ok();
         for diff in &diffs {
-            println!("Diff: {:?}", diff);
+            writeln!(writer, "Diff: {:?}", diff).ok();
         }
     } else {
-        println!("Differences (showing first 10 of {}):", diffs.len());
+        writeln!(writer, "Differences (showing first 10 of {}):", diffs.len()).ok();
         for diff in diffs.iter().take(10) {
-            println!("Diff: {:?}", diff);
+            writeln!(writer, "Diff: {:?}", diff).ok();
         }
-        println!("...and {} more", diffs.len() - 10);
+        writeln!(writer, "...and {} more", diffs.len() - 10).ok();
     }
-    println!("Done printing diffs.");
-    println!("Scan duration: {:.2?}", scan_duration);
-    println!("Files scanned: {}", total_files);
-    println!("Differences found: {}", num_diffs);
-    println!("Percent changed: {:.2}%", percent_changed);
+    writer.flush().ok();
+    println!("Output written to {}", output_path.display());
 }
 
