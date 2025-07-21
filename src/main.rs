@@ -1,3 +1,4 @@
+use std::env;
 use std::fs::{self, File, Metadata};
 use std::sync::atomic::AtomicUsize;
 use std::path::Path;
@@ -6,6 +7,8 @@ use std::time::SystemTime;
 use sha2::{Sha256, Digest};
 use std::io::{Read, BufReader};
 use rayon::prelude::*;
+use xxhash_rust::xxh3::Xxh3;
+use memmap2::Mmap;
 
 #[derive(Debug)]
 enum DiffType {
@@ -44,15 +47,63 @@ fn get_dir_files(root: &Path, base: &Path, files: &mut HashMap<String, Metadata>
 
 fn hash_file(path: &Path) -> Option<Vec<u8>> {
     let file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let file_size = metadata.len();
+    
+    // For very small files (< 1KB), compare content directly
+    if file_size < 1024 {
+        return hash_small_file(path);
+    }
+    
+    // For large files, use memory mapping
+    if file_size > 1024 * 1024 { // 1MB
+        return hash_large_file(path);
+    }
+    
+    // For medium files, use buffered reading with xxHash
+    hash_medium_file(path)
+}
+
+fn hash_small_file(path: &Path) -> Option<Vec<u8>> {
+    let mut file = File::open(path).ok()?;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content).ok()?;
+    
+    let mut hasher = Xxh3::new();
+    hasher.update(&content);
+    Some(hasher.digest().to_le_bytes().to_vec())
+}
+
+fn hash_medium_file(path: &Path) -> Option<Vec<u8>> {
+    let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 32768]; // Increased buffer size for better I/O performance
+    let mut hasher = Xxh3::new();
+    let mut buffer = [0u8; 32768];
+    
     loop {
         let n = reader.read(&mut buffer).ok()?;
         if n == 0 { break; }
         hasher.update(&buffer[..n]);
     }
-    Some(hasher.finalize().to_vec())
+    Some(hasher.digest().to_le_bytes().to_vec())
+}
+
+fn hash_large_file(path: &Path) -> Option<Vec<u8>> {
+    let file = File::open(path).ok()?;
+    let mmap = unsafe { Mmap::map(&file).ok()? };
+    let mut hasher = Xxh3::new();
+    hasher.update(&mmap);
+    Some(hasher.digest().to_le_bytes().to_vec())
+}
+
+fn compare_small_files(left_path: &Path, right_path: &Path) -> Option<bool> {
+    let mut left_content = Vec::new();
+    let mut right_content = Vec::new();
+    
+    File::open(left_path).ok()?.read_to_end(&mut left_content).ok()?;
+    File::open(right_path).ok()?.read_to_end(&mut right_content).ok()?;
+    
+    Some(left_content == right_content)
 }
 
 fn compare_dirs(left: &Path, right: &Path) -> Vec<Diff> {
@@ -480,56 +531,81 @@ fn main() {
         let total_files = all_paths.len();
         println!("Processing {} files in parallel...", total_files);
         
-        all_paths.par_iter().filter_map(|path| {
-            let count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            if count % 1000 == 0 {
-                print!("\rProcessed {} / {} files ({:.1}%)", count, total_files, (count as f64 / total_files as f64) * 100.0);
-                std::io::stdout().flush().unwrap();
-            }
-            match (left_files.get(*path), right_files.get(*path)) {
-                (Some(left_meta), Some(right_meta)) => {
-                    let left_size = left_meta.len();
-                    let right_size = right_meta.len();
-                    let left_time = left_meta.modified().ok();
-                    let right_time = right_meta.modified().ok();
-                    if left_size != right_size {
-                        Some(Diff {
-                            path: (*path).clone(),
-                            diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
-                        })
-                    } else if left_time != right_time {
-                        // Only hash if sizes are the same but times differ
-                        let left_hash = hash_file(&left.join(*path));
-                        let right_hash = hash_file(&right.join(*path));
-                        if left_hash != right_hash {
-                            Some(Diff {
+        // Process files in chunks for better parallelism control
+        let chunk_size = 1000;
+        let paths_vec: Vec<_> = all_paths.into_iter().collect();
+        
+        paths_vec.chunks(chunk_size).flat_map(|chunk| {
+            chunk.par_iter().filter_map(|path| {
+                let count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if count % 1000 == 0 {
+                    print!("\rProcessed {} / {} files ({:.1}%)", count, total_files, (count as f64 / total_files as f64) * 100.0);
+                    std::io::stdout().flush().unwrap();
+                }
+                
+                match (left_files.get(*path), right_files.get(*path)) {
+                    (Some(left_meta), Some(right_meta)) => {
+                        let left_size = left_meta.len();
+                        let right_size = right_meta.len();
+                        let left_time = left_meta.modified().ok();
+                        let right_time = right_meta.modified().ok();
+                        
+                        // Early exit for size differences
+                        if left_size != right_size {
+                            return Some(Diff {
                                 path: (*path).clone(),
                                 diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
-                            })
-                        } else {
-                            None
+                            });
                         }
-                    } else {
-                        // Same size and time - assume identical, skip hashing
+                        
+                        // Early exit for time differences
+                        if left_time != right_time {
+                            // For small files, compare content directly instead of hashing
+                            if left_size < 1024 {
+                                let left_path = left.join(*path);
+                                let right_path = right.join(*path);
+                                if let Some(are_equal) = compare_small_files(&left_path, &right_path) {
+                                    if !are_equal {
+                                        return Some(Diff {
+                                            path: (*path).clone(),
+                                            diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
+                                        });
+                                    }
+                                }
+                            } else {
+                                // Hash and compare for larger files
+                                let left_hash = hash_file(&left.join(*path));
+                                let right_hash = hash_file(&right.join(*path));
+                                if left_hash != right_hash {
+                                    return Some(Diff {
+                                        path: (*path).clone(),
+                                        diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
+                                    });
+                                }
+                            }
+                        }
+                        
+                        // Same size and time - assume identical
                         None
                     }
+                    (Some(_), None) => {
+                        Some(Diff {
+                            path: (*path).clone(),
+                            diff_type: DiffType::OnlyInLeft,
+                        })
+                    }
+                    (None, Some(_)) => {
+                        Some(Diff {
+                            path: (*path).clone(),
+                            diff_type: DiffType::OnlyInRight,
+                        })
+                    }
+                    (None, None) => None,
                 }
-                (Some(_), None) => {
-                    Some(Diff {
-                        path: (*path).clone(),
-                        diff_type: DiffType::OnlyInLeft,
-                    })
-                }
-                (None, Some(_)) => {
-                    Some(Diff {
-                        path: (*path).clone(),
-                        diff_type: DiffType::OnlyInRight,
-                    })
-                }
-                (None, None) => None,
-            }
+            }).collect::<Vec<_>>()
         }).collect()
     };
+    println!("\nDiff calculation complete, about to print results...");
     let scan_duration = scan_start.elapsed();
     let total_files: usize = {
         let mut left_files = HashSet::new();
@@ -568,16 +644,20 @@ fn main() {
     println!("Percent changed: {:.2}%", percent_changed);
 
     println!("About to print diffs...");
+    let all_only_in_left = diffs.iter().all(|diff| matches!(diff.diff_type, DiffType::OnlyInLeft));
     if diffs.is_empty() {
         println!("No differences found.");
-    } else {
+    } else if diffs.len() < 200 || all_only_in_left {
         println!("Differences:");
+        for diff in &diffs {
+            println!("Diff: {:?}", diff);
+        }
+    } else {
+        println!("Differences (showing first 10 of {}):", diffs.len());
         for diff in diffs.iter().take(10) {
             println!("Diff: {:?}", diff);
         }
-        if diffs.len() > 10 {
-            println!("...and {} more", diffs.len() - 10);
-        }
+        println!("...and {} more", diffs.len() - 10);
     }
     println!("Done printing diffs.");
     println!("Scan duration: {:.2?}", scan_duration);

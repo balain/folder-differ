@@ -7,3 +7,5 @@ edition = "2024"
 sha2 = "0.10"
 rayon = "1.10"
 indicatif = "0.17"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+memmap2 = "0.9"
