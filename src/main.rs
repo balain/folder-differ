@@ -594,10 +594,12 @@ fn main() {
     eprintln!("[BENCH] Phase 1 (counting) duration: {:.2?}", phase1_time);
 
     // PHASE 2: Scan with percent-complete progress bar using jwalk
-    let scan_pb = ProgressBar::new(scan_total as u64);
-    scan_pb.set_style(ProgressStyle::with_template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% {msg}").unwrap());
+    let left_total = left_file_count.load(Ordering::SeqCst) + left_dir_count.load(Ordering::SeqCst);
+    let right_total = right_file_count.load(Ordering::SeqCst) + right_dir_count.load(Ordering::SeqCst);
 
     let phase2_start = Instant::now();
+    let left_scan_pb = ProgressBar::new(left_total as u64);
+    left_scan_pb.set_style(ProgressStyle::with_template("[Left {elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% {msg}").unwrap());
     let mut left_files = FxHashMap::default();
     for entry in jwalk::WalkDir::new(left) {
         if let Ok(dir_entry) = entry {
@@ -607,9 +609,13 @@ fn main() {
                     left_files.insert(rel_path, meta);
                 }
             }
-            scan_pb.inc(1);
+            left_scan_pb.inc(1);
         }
     }
+    left_scan_pb.finish_with_message("Left scan complete");
+
+    let right_scan_pb = ProgressBar::new(right_total as u64);
+    right_scan_pb.set_style(ProgressStyle::with_template("[Right {elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% {msg}").unwrap());
     let mut right_files = FxHashMap::default();
     for entry in jwalk::WalkDir::new(right) {
         if let Ok(dir_entry) = entry {
@@ -619,10 +625,10 @@ fn main() {
                     right_files.insert(rel_path, meta);
                 }
             }
-            scan_pb.inc(1);
+            right_scan_pb.inc(1);
         }
     }
-    scan_pb.finish_with_message("Scan complete");
+    right_scan_pb.finish_with_message("Right scan complete");
     let phase2_time = phase2_start.elapsed();
     eprintln!("[BENCH] Phase 2 (scanning) duration: {:.2?}", phase2_time);
 
