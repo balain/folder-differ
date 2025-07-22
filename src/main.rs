@@ -10,10 +10,13 @@ use memmap2::Mmap;
 use blake3;
 use ignore::{WalkBuilder, WalkState, DirEntry};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 use num_cpus;
+use std::sync::{Arc, Mutex};
+use jwalk::WalkDirGeneric;
+use jwalk::Parallelism;
+use std::io::Seek;
 
 #[derive(Debug)]
 enum DiffType {
@@ -54,23 +57,64 @@ fn get_dir_files_with_ignore(root: &Path, files: &mut FxHashMap<String, Metadata
     }
 }
 
+// Hash sampling for large files: hash only first and last 64KB for files > 100MB
+fn hash_sampled_file(path: &Path) -> Option<Vec<u8>> {
+    const SAMPLE_SIZE: usize = 64 * 1024; // 64KB
+    const MIN_SIZE: u64 = 100 * 1024 * 1024; // 100MB
+    let file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let file_size = metadata.len();
+    if file_size < MIN_SIZE {
+        return None;
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; SAMPLE_SIZE];
+    // Hash first 64KB
+    let mut reader = BufReader::new(&file);
+    let n = reader.read(&mut buf).ok()?;
+    hasher.update(&buf[..n]);
+    // Hash last 64KB
+    if file_size > SAMPLE_SIZE as u64 {
+        let mut file = File::open(path).ok()?;
+        file.seek(std::io::SeekFrom::End(-(SAMPLE_SIZE as i64))).ok()?;
+        let n = file.read(&mut buf).ok()?;
+        hasher.update(&buf[..n]);
+    }
+    Some(hasher.finalize().as_bytes().to_vec())
+}
+
+// jwalk-based fast parallel directory traversal
+fn get_dir_files_jwalk(root: &Path) -> FxHashMap<String, Metadata> {
+    let mut files = FxHashMap::default();
+    for entry in jwalk::WalkDir::new(root)
+        .parallelism(Parallelism::RayonNewPool(8))
+        .skip_hidden(false)
+    {
+        if let Ok(dir_entry) = entry {
+            if dir_entry.file_type().is_file() {
+                let rel_path = dir_entry.path().strip_prefix(root).unwrap().to_string_lossy().to_string();
+                if let Ok(meta) = dir_entry.metadata() {
+                    files.insert(rel_path, meta);
+                }
+            }
+        }
+    }
+    files
+}
 
 fn hash_file(path: &Path) -> Option<Vec<u8>> {
     let file = File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
     let file_size = metadata.len();
-    
-    // For very small files (< 1KB), compare content directly
+    if let Some(sampled_hash) = hash_sampled_file(path) {
+        return Some(sampled_hash);
+    }
     if file_size < 1024 {
         return hash_small_file(path);
     }
-    
-    // For large files, use memory mapping and BLAKE3 parallel hashing
-    if file_size > 1024 * 1024 { // 1MB
+    if file_size > 1024 * 1024 {
         return hash_large_file_blake3(path);
     }
-    
-    // For medium files, use buffered reading with BLAKE3
     hash_medium_file_blake3(path)
 }
 
@@ -444,8 +488,23 @@ fn count_files_dirs(root: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_c
     }
 }
 
+fn print_usage(program: &str) {
+    println!("Usage: {} <left_dir> <right_dir> [--threads N] [--sync] [--dry-run] [--rollback] [--synthetic-benchmark]", program);
+    println!("\nOptions:");
+    println!("  --threads N              Set number of threads for parallelism (default: 2x logical CPUs)");
+    println!("  --sync                   Plan and perform sync actions (copy/delete files)");
+    println!("  --dry-run                Show planned sync actions without making changes");
+    println!("  --rollback               Roll back the last sync operation using backups");
+    println!("  --synthetic-benchmark    Run a synthetic benchmark (creates and scans a large fake tree)");
+    println!("  --help                   Show this help message");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_usage(&args[0]);
+        return;
+    }
     // Thread count CLI option
     let mut thread_count: Option<usize> = None;
     let mut left_dir_arg = None;
@@ -467,8 +526,12 @@ fn main() {
             i += 1;
         }
     }
-    let left_dir = left_dir_arg.expect("Missing left_dir argument");
-    let right_dir = right_dir_arg.expect("Missing right_dir argument");
+    if left_dir_arg.is_none() || right_dir_arg.is_none() {
+        print_usage(&args[0]);
+        std::process::exit(1);
+    }
+    let left_dir = left_dir_arg.unwrap();
+    let right_dir = right_dir_arg.unwrap();
     let left = Path::new(&left_dir);
     let right = Path::new(&right_dir);
 
@@ -481,10 +544,6 @@ fn main() {
     if args.contains(&"--synthetic-benchmark".to_string()) {
         run_synthetic_benchmark();
         return;
-    }
-    if args.len() < 3 {
-        eprintln!("Usage: {} <left_dir> <right_dir> [--sync] [--dry-run] [--rollback] [--synthetic-benchmark]", args[0]);
-        std::process::exit(1);
     }
     let do_sync = args.contains(&"--sync".to_string());
     let dry_run = args.contains(&"--dry-run".to_string());
@@ -543,137 +602,113 @@ fn main() {
     let right_scan_dir_count = std::sync::Arc::new(AtomicUsize::new(0));
 
     let phase2_start = Instant::now();
-    fn get_dir_files_progress(root: &Path, base: &Path, file_count: &std::sync::Arc<AtomicUsize>, dir_count: &std::sync::Arc<AtomicUsize>, pb: &ProgressBar) -> FxHashMap<String, Metadata> {
-        let mut files = FxHashMap::default();
-        if let Ok(entries) = fs::read_dir(root) {
-            let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            for entry in entries {
-                let path = entry.path();
-                let rel_path = path.strip_prefix(base).unwrap().to_string_lossy().to_string();
-                if path.is_dir() {
-                    dir_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(std::sync::atomic::Ordering::SeqCst), file_count.load(std::sync::atomic::Ordering::SeqCst)));
-                    pb.set_position((dir_count.load(std::sync::atomic::Ordering::SeqCst) + file_count.load(std::sync::atomic::Ordering::SeqCst)) as u64);
-                    let sub_files = get_dir_files_progress(&path, base, file_count, dir_count, pb);
-                    files.extend(sub_files);
-                } else {
-                    if let Ok(meta) = entry.metadata() {
-                        file_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        pb.set_message(format!("Dirs: {}  Files: {}", dir_count.load(std::sync::atomic::Ordering::SeqCst), file_count.load(std::sync::atomic::Ordering::SeqCst)));
-                        pb.set_position((dir_count.load(std::sync::atomic::Ordering::SeqCst) + file_count.load(std::sync::atomic::Ordering::SeqCst)) as u64);
-                        files.insert(rel_path, meta);
-                    }
-                }
-            }
-        }
-        files
-    }
-
+    // Use jwalk for fast parallel directory traversal
     let (left_files, right_files) = rayon::join(
-        || get_dir_files_progress(left, left, &left_scan_file_count, &left_scan_dir_count, &scan_pb),
-        || get_dir_files_progress(right, right, &right_scan_file_count, &right_scan_dir_count, &scan_pb),
+        || get_dir_files_jwalk(left),
+        || get_dir_files_jwalk(right),
     );
-    scan_pb.finish_with_message("Scan complete");
     let phase2_time = phase2_start.elapsed();
     eprintln!("[BENCH] Phase 2 (scanning) duration: {:.2?}", phase2_time);
 
     let phase3_start = Instant::now();
     println!("About to start diff calculation...");
-    let diffs: Vec<Diff> = {
-        let all_paths: FxHashSet<_> = left_files.keys().chain(right_files.keys()).collect();
-        let processed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let total_files = all_paths.len();
-        println!("Processing {} files in parallel...", total_files);
-        let chunk_size = 1000;
-        let paths_vec: Vec<_> = all_paths.into_iter().collect();
-        let result: Vec<Diff> = paths_vec.chunks(chunk_size).flat_map(|chunk| {
-            chunk.par_iter().filter_map(|path| {
-                let _count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                match (left_files.get(*path), right_files.get(*path)) {
-                    (Some(left_meta), Some(right_meta)) => {
-                        let left_size = left_meta.len();
-                        let right_size = right_meta.len();
-                        let left_time = left_meta.modified().ok();
-                        let right_time = right_meta.modified().ok();
-                        if left_size != right_size {
-                            return Some(Diff {
-                                path: (*path).clone(),
-                                diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
-                            });
-                        }
-                        if left_time != right_time {
-                            if left_size < 1024 {
-                                let left_path = left.join(*path);
-                                let right_path = right.join(*path);
-                                if let Some(are_equal) = compare_small_files(&left_path, &right_path) {
-                                    if !are_equal {
-                                        return Some(Diff {
-                                            path: (*path).clone(),
-                                            diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
-                                        });
-                                    }
-                                }
-                            } else {
-                                let left_hash = hash_file(&left.join(*path));
-                                let right_hash = hash_file(&right.join(*path));
-                                if left_hash != right_hash {
-                                    return Some(Diff {
+    // Stream diffs to file as they are computed
+    let writer = Arc::new(Mutex::new(writer));
+    let all_only_in_left = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let processed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let total_diffs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let all_paths: FxHashSet<_> = left_files.keys().chain(right_files.keys()).collect();
+    let total_files = all_paths.len();
+    println!("Processing {} files in parallel...", total_files);
+    let chunk_size = 1000;
+    let paths_vec: Vec<_> = all_paths.into_iter().collect();
+    {
+        let mut w = writer.lock().unwrap();
+        writeln!(w, "Differences:").ok();
+    }
+    paths_vec.chunks(chunk_size).for_each(|chunk| {
+        let writer = Arc::clone(&writer);
+        let all_only_in_left = Arc::clone(&all_only_in_left);
+        let processed_count = Arc::clone(&processed_count);
+        let total_diffs = Arc::clone(&total_diffs);
+        chunk.par_iter().for_each(|path| {
+            let _count = processed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let diff_opt = match (left_files.get(*path), right_files.get(*path)) {
+                (Some(left_meta), Some(right_meta)) => {
+                    let left_size = left_meta.len();
+                    let right_size = right_meta.len();
+                    let left_time = left_meta.modified().ok();
+                    let right_time = right_meta.modified().ok();
+                    if left_size != right_size {
+                        Some(Diff {
+                            path: (*path).clone(),
+                            diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
+                        })
+                    } else if left_time != right_time {
+                        if left_size < 1024 {
+                            let left_path = left.join(*path);
+                            let right_path = right.join(*path);
+                            if let Some(are_equal) = compare_small_files(&left_path, &right_path) {
+                                if !are_equal {
+                                    Some(Diff {
                                         path: (*path).clone(),
                                         diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
-                                    });
+                                    })
+                                } else {
+                                    None
                                 }
+                            } else {
+                                None
+                            }
+                        } else {
+                            let left_hash = hash_file(&left.join(*path));
+                            let right_hash = hash_file(&right.join(*path));
+                            if left_hash != right_hash {
+                                Some(Diff {
+                                    path: (*path).clone(),
+                                    diff_type: DiffType::Different { left_size, right_size, left_time, right_time },
+                                })
+                            } else {
+                                None
                             }
                         }
+                    } else {
                         None
                     }
-                    (Some(_), None) => {
-                        Some(Diff {
-                            path: (*path).clone(),
-                            diff_type: DiffType::OnlyInLeft,
-                        })
-                    }
-                    (None, Some(_)) => {
-                        Some(Diff {
-                            path: (*path).clone(),
-                            diff_type: DiffType::OnlyInRight,
-                        })
-                    }
-                    (None, None) => None,
                 }
-            }).collect::<Vec<_>>()
-        }).collect();
-        let processed = processed_count.load(std::sync::atomic::Ordering::SeqCst);
-        print!("\rProcessed {} / {} files ({:.1}%)\n", processed, total_files, (processed as f64 / total_files as f64) * 100.0);
-        std::io::stdout().flush().unwrap();
-        result
-    };
+                (Some(_), None) => {
+                    Some(Diff {
+                        path: (*path).clone(),
+                        diff_type: DiffType::OnlyInLeft,
+                    })
+                }
+                (None, Some(_)) => {
+                    all_only_in_left.store(false, std::sync::atomic::Ordering::SeqCst);
+                    Some(Diff {
+                        path: (*path).clone(),
+                        diff_type: DiffType::OnlyInRight,
+                    })
+                }
+                (None, None) => None,
+            };
+            if let Some(diff) = diff_opt {
+                let mut w = writer.lock().unwrap();
+                writeln!(w, "Diff: {:?}", diff).ok();
+                total_diffs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    });
     let phase3_time = phase3_start.elapsed();
     eprintln!("[BENCH] Phase 3 (diffing) duration: {:.2?}", phase3_time);
+    let total_diffs = total_diffs.load(std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut w = writer.lock().unwrap();
+        writeln!(w, "Total differences found: {}", total_diffs).ok();
+        w.flush().ok();
+    }
+    println!("Output written to {}", output_path.display());
 
     let total_time = total_start.elapsed();
     eprintln!("[BENCH] Total duration: {:.2?}", total_time);
-
-    // Output to file (buffered)
-    writeln!(writer, "Scan duration: {:.2?}", total_time).ok();
-    writeln!(writer, "Files scanned: {}", left_files.len() + right_files.len()).ok();
-    writeln!(writer, "Differences found: {}", diffs.len()).ok();
-    writeln!(writer, "").ok();
-    let all_only_in_left = diffs.iter().all(|diff| matches!(diff.diff_type, DiffType::OnlyInLeft));
-    if diffs.is_empty() {
-        writeln!(writer, "No differences found.").ok();
-    } else if diffs.len() < 200 || all_only_in_left {
-        writeln!(writer, "Differences:").ok();
-        for diff in &diffs {
-            writeln!(writer, "Diff: {:?}", diff).ok();
-        }
-    } else {
-        writeln!(writer, "Differences (showing first 10 of {}):", diffs.len()).ok();
-        for diff in diffs.iter().take(10) {
-            writeln!(writer, "Diff: {:?}", diff).ok();
-        }
-        writeln!(writer, "...and {} more", diffs.len() - 10).ok();
-    }
-    writer.flush().ok();
-    println!("Output written to {}", output_path.display());
 }
 
