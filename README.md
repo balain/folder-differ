@@ -2,6 +2,8 @@
 
 A fast, parallel, and robust directory comparison and sync tool written in Rust.
 
+Developed using Windsurf and Cursor.
+
 ## Features
 - **Parallel directory scanning** with progress bars
 - **Efficient file comparison** using size, modification time, and fast hashing (xxHash3)
