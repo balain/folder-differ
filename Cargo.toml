@@ -14,3 +14,11 @@ ignore = "0.4"
 rustc-hash = "1.1"
 num_cpus = "1.16"
 jwalk = "0.8"
+
+
+[profile.release]
+opt-level = 3     # Optimize for size.
+lto = true        # Enable Link Time Optimization
+codegen-units = 1 # Reduce number of codegen units to increase optimizations.
+panic = "abort"   # Abort on panic
+strip = true      # Automatically strip symbols from the binary.
