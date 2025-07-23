@@ -1,8 +1,6 @@
 use anyhow::Result as AnyResult;
 use ctrlc;
-use folder_differ::{
-    diff, hash, progress,
-};
+use folder_differ::{diff, hash, progress};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use log::{debug, info, warn};
 use rustc_hash::{FxHashMap, FxHashSet};

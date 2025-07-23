@@ -1,6 +1,5 @@
 //! Progress bar and benchmarking utilities for folder-differ
 
-use crate::FolderDifferError;
 use crate::Result;
 use indicatif::ProgressBar;
 use std::path::Path;
