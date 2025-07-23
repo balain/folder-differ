@@ -87,4 +87,44 @@ pub fn compare_small_files(left_path: &Path, right_path: &Path) -> Option<bool> 
     File::open(left_path).ok()?.read_to_end(&mut left_content).ok()?;
     File::open(right_path).ok()?.read_to_end(&mut right_content).ok()?;
     Some(left_content == right_content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+    use std::io::Write;
+
+    fn write_tempfile(content: &[u8]) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content).unwrap();
+        file
+    }
+
+    #[test]
+    fn test_hash_file_identical() {
+        let file1 = write_tempfile(b"hello world");
+        let file2 = write_tempfile(b"hello world");
+        let hash1 = hash_file(file1.path()).unwrap();
+        let hash2 = hash_file(file2.path()).unwrap();
+        assert_eq!(hash1, hash2, "Hashes should match for identical content");
+    }
+
+    #[test]
+    fn test_hash_file_different() {
+        let file1 = write_tempfile(b"hello world");
+        let file2 = write_tempfile(b"goodbye world");
+        let hash1 = hash_file(file1.path()).unwrap();
+        let hash2 = hash_file(file2.path()).unwrap();
+        assert_ne!(hash1, hash2, "Hashes should differ for different content");
+    }
+
+    #[test]
+    fn test_compare_small_files() {
+        let file1 = write_tempfile(b"abc");
+        let file2 = write_tempfile(b"abc");
+        let file3 = write_tempfile(b"xyz");
+        assert_eq!(compare_small_files(file1.path(), file2.path()), Some(true));
+        assert_eq!(compare_small_files(file1.path(), file3.path()), Some(false));
+    }
 } 

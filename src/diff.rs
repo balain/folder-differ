@@ -120,4 +120,52 @@ pub fn compare_dirs(left: &Path, right: &Path) -> Vec<Diff> {
             (None, None) => None,
         }
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::path::Path;
+
+    fn write_file(path: &Path, content: &[u8]) {
+        let mut file = File::create(path).unwrap();
+        file.write_all(content).unwrap();
+    }
+
+    #[test]
+    fn test_identical_dirs() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        write_file(&dir1.path().join("a.txt"), b"hello");
+        write_file(&dir2.path().join("a.txt"), b"hello");
+
+        let diffs = super::compare_dirs(dir1.path(), dir2.path());
+        assert!(diffs.is_empty(), "No diffs expected for identical dirs");
+    }
+
+    #[test]
+    fn test_file_only_in_left() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        write_file(&dir1.path().join("a.txt"), b"hello");
+
+        let diffs = super::compare_dirs(dir1.path(), dir2.path());
+        assert_eq!(diffs.len(), 1);
+        assert!(matches!(diffs[0].diff_type, super::DiffType::OnlyInLeft));
+    }
+
+    #[test]
+    fn test_file_content_diff() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        write_file(&dir1.path().join("a.txt"), b"hello");
+        write_file(&dir2.path().join("a.txt"), b"world");
+
+        let diffs = super::compare_dirs(dir1.path(), dir2.path());
+        assert_eq!(diffs.len(), 1);
+        assert!(matches!(diffs[0].diff_type, super::DiffType::Different { .. }));
+    }
 } 

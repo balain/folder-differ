@@ -78,4 +78,38 @@ pub fn count_files_dirs(
             }
         });
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use indicatif::ProgressBar;
+
+    #[test]
+    fn test_count_files_dirs_simple() {
+        let dir = tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(dir.path().join("a.txt"), b"foo").unwrap();
+        fs::write(subdir.join("b.txt"), b"bar").unwrap();
+        let file_count = Arc::new(AtomicUsize::new(0));
+        let dir_count = Arc::new(AtomicUsize::new(0));
+        let active_tasks = Arc::new(AtomicUsize::new(1));
+        let max_tasks = Arc::new(AtomicUsize::new(1));
+        let pb = ProgressBar::hidden();
+        count_files_dirs(
+            dir.path(),
+            &file_count,
+            &dir_count,
+            &pb,
+            &active_tasks,
+            &max_tasks,
+        );
+        assert_eq!(file_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(dir_count.load(std::sync::atomic::Ordering::SeqCst), 1); // only the subdir is counted
+    }
 } 

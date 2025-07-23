@@ -31,4 +31,24 @@ pub fn get_dir_files_with_ignore(root: &Path, files: &mut FxHashMap<String, Meta
 pub mod diff;
 pub mod sync;
 pub mod hash;
-pub mod progress; 
+pub mod progress;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs::File;
+    use std::io::Write;
+    use rustc_hash::FxHashMap;
+
+    #[test]
+    fn test_get_dir_files_with_ignore_basic() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("foo.txt");
+        File::create(&file_path).unwrap().write_all(b"abc").unwrap();
+
+        let mut files = FxHashMap::default();
+        get_dir_files_with_ignore(dir.path(), &mut files, &[]);
+        assert!(files.contains_key("foo.txt"));
+    }
+} 
