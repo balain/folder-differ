@@ -1,6 +1,8 @@
 //! Synchronization actions, logging, and rollback for folder-differ
 
 use crate::diff::{Diff, DiffType};
+use crate::FolderDifferError;
+use crate::Result;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -59,57 +61,67 @@ pub fn log_sync_action(log: &mut SyncLog, action: &SyncAction, details: &str) {
 }
 
 /// Save the sync log to disk.
-pub fn save_sync_log(log: &SyncLog, path: &Path) {
+pub fn save_sync_log(log: &SyncLog, path: &Path) -> Result<()> {
     let log_path = path.join(".sync-log.txt");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-        for entry in &log.entries {
-            let _ = writeln!(
-                file,
-                "{:?} at {:?}: {}",
-                entry.action, entry.timestamp, entry.details
-            );
-        }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    for entry in &log.entries {
+        writeln!(
+            file,
+            "{:?} at {:?}: {}",
+            entry.action, entry.timestamp, entry.details
+        )?;
     }
+    Ok(())
 }
 
 /// Save the sync state to disk.
-pub fn save_sync_state(_state: &SyncState, path: &Path) {
-    let _ = std::fs::write(path.join(".sync-state.json"), "{}\n");
+pub fn save_sync_state(_state: &SyncState, path: &Path) -> Result<()> {
+    std::fs::write(path.join(".sync-state.json"), "{}\n")?;
+    Ok(())
 }
 
 /// Create a backup of a file before modification.
-pub fn backup_file(path: &Path) -> Option<PathBuf> {
+pub fn backup_file(path: &Path) -> Result<Option<PathBuf>> {
     if path.exists() {
         let backup_path = path.with_extension("bak");
-        std::fs::copy(path, &backup_path).ok()?;
-        Some(backup_path)
+        std::fs::copy(path, &backup_path)?;
+        Ok(Some(backup_path))
     } else {
-        None
+        Ok(None)
     }
 }
 
 /// Restore a file from its backup.
-pub fn restore_file(backup_path: &Path, orig_path: &Path) -> bool {
-    std::fs::copy(backup_path, orig_path).is_ok()
+pub fn restore_file(backup_path: &Path, orig_path: &Path) -> Result<()> {
+    std::fs::copy(backup_path, orig_path)?;
+    Ok(())
 }
 
 /// Delete a file with backup.
-pub fn delete_file_with_backup(path: &Path) -> Option<PathBuf> {
-    let backup = backup_file(path);
-    std::fs::remove_file(path).ok()?;
-    backup
+pub fn delete_file_with_backup(path: &Path) -> Result<Option<PathBuf>> {
+    let backup = backup_file(path)?;
+    std::fs::remove_file(path)?;
+    Ok(backup)
 }
 
 /// Perform a sync action.
-pub fn perform_sync_action(action: &SyncAction, left: &Path, right: &Path, log: &mut SyncLog) {
+pub fn perform_sync_action(
+    action: &SyncAction,
+    left: &Path,
+    right: &Path,
+    log: &mut SyncLog,
+) -> Result<()> {
     match action {
         SyncAction::CopyLeftToRight(rel_path) => {
             let src = left.join(rel_path);
             let dst = right.join(rel_path);
             if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
-            let backup = backup_file(&dst);
+            let backup = backup_file(&dst)?;
             let res = std::fs::copy(&src, &dst);
             let msg = if let Ok(_) = res {
                 format!("Copied {} to right. Backup: {:?}", rel_path, backup)
@@ -122,9 +134,9 @@ pub fn perform_sync_action(action: &SyncAction, left: &Path, right: &Path, log: 
             let src = right.join(rel_path);
             let dst = left.join(rel_path);
             if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
-            let backup = backup_file(&dst);
+            let backup = backup_file(&dst)?;
             let res = std::fs::copy(&src, &dst);
             let msg = if let Ok(_) = res {
                 format!("Copied {} to left. Backup: {:?}", rel_path, backup)
@@ -135,7 +147,7 @@ pub fn perform_sync_action(action: &SyncAction, left: &Path, right: &Path, log: 
         }
         SyncAction::DeleteLeft(rel_path) => {
             let path = left.join(rel_path);
-            let backup = delete_file_with_backup(&path);
+            let backup = delete_file_with_backup(&path)?;
             let msg = if backup.is_some() {
                 format!("Deleted {} from left. Backup: {:?}", rel_path, backup)
             } else {
@@ -145,7 +157,7 @@ pub fn perform_sync_action(action: &SyncAction, left: &Path, right: &Path, log: 
         }
         SyncAction::DeleteRight(rel_path) => {
             let path = right.join(rel_path);
-            let backup = delete_file_with_backup(&path);
+            let backup = delete_file_with_backup(&path)?;
             let msg = if backup.is_some() {
                 format!("Deleted {} from right. Backup: {:?}", rel_path, backup)
             } else {
@@ -162,18 +174,19 @@ pub fn perform_sync_action(action: &SyncAction, left: &Path, right: &Path, log: 
             log_sync_action(log, action, &msg);
         }
     }
+    Ok(())
 }
 
 /// Roll back all sync actions in the log.
-pub fn rollback(log: &SyncLog, left: &Path, right: &Path) {
+pub fn rollback(log: &SyncLog, left: &Path, right: &Path) -> Result<()> {
     for entry in log.entries.iter().rev() {
         match &entry.action {
             SyncAction::CopyLeftToRight(rel_path) => {
                 let dst = right.join(rel_path);
                 let backup = dst.with_extension("bak");
                 if backup.exists() {
-                    restore_file(&backup, &dst);
-                    let _ = std::fs::remove_file(&backup);
+                    restore_file(&backup, &dst)?;
+                    std::fs::remove_file(&backup)?;
                 } else {
                     let _ = std::fs::remove_file(&dst);
                 }
@@ -183,8 +196,8 @@ pub fn rollback(log: &SyncLog, left: &Path, right: &Path) {
                 let dst = left.join(rel_path);
                 let backup = dst.with_extension("bak");
                 if backup.exists() {
-                    restore_file(&backup, &dst);
-                    let _ = std::fs::remove_file(&backup);
+                    restore_file(&backup, &dst)?;
+                    std::fs::remove_file(&backup)?;
                 } else {
                     let _ = std::fs::remove_file(&dst);
                 }
@@ -194,8 +207,8 @@ pub fn rollback(log: &SyncLog, left: &Path, right: &Path) {
                 let orig = left.join(rel_path);
                 let backup = orig.with_extension("bak");
                 if backup.exists() {
-                    restore_file(&backup, &orig);
-                    let _ = std::fs::remove_file(&backup);
+                    restore_file(&backup, &orig)?;
+                    std::fs::remove_file(&backup)?;
                 }
                 println!("Rolled back DeleteLeft: {}", rel_path);
             }
@@ -203,8 +216,8 @@ pub fn rollback(log: &SyncLog, left: &Path, right: &Path) {
                 let orig = right.join(rel_path);
                 let backup = orig.with_extension("bak");
                 if backup.exists() {
-                    restore_file(&backup, &orig);
-                    let _ = std::fs::remove_file(&backup);
+                    restore_file(&backup, &orig)?;
+                    std::fs::remove_file(&backup)?;
                 }
                 println!("Rolled back DeleteRight: {}", rel_path);
             }
@@ -213,4 +226,5 @@ pub fn rollback(log: &SyncLog, left: &Path, right: &Path) {
             }
         }
     }
+    Ok(())
 }

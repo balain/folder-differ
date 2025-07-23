@@ -1,11 +1,13 @@
 //! Progress bar and benchmarking utilities for folder-differ
 
+use crate::FolderDifferError;
+use crate::Result;
 use indicatif::ProgressBar;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
 /// Run a synthetic benchmark by creating and scanning a large fake tree.
-pub fn run_synthetic_benchmark() {
+pub fn run_synthetic_benchmark() -> Result<()> {
     use std::fs;
     use std::sync::Arc;
     use std::time::Instant;
@@ -14,13 +16,13 @@ pub fn run_synthetic_benchmark() {
     let n_files_per_dir = 100;
     let file_size = 4096;
     let _ = fs::remove_dir_all(root);
-    fs::create_dir_all(root).unwrap();
+    fs::create_dir_all(root)?;
     for d in 0..n_dirs {
         let dir = root.join(format!("dir{:03}", d));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir)?;
         for f in 0..n_files_per_dir {
             let file = dir.join(format!("file{:03}.bin", f));
-            std::fs::write(&file, vec![b'x'; file_size]).unwrap();
+            std::fs::write(&file, vec![b'x'; file_size])?;
         }
     }
     println!(
@@ -42,7 +44,7 @@ pub fn run_synthetic_benchmark() {
         &pb,
         &active_tasks,
         &max_tasks,
-    );
+    )?;
     let elapsed = start.elapsed();
     println!(
         "Scan complete: files={}, dirs={}, time={:?}, max_parallel_tasks={}",
@@ -53,6 +55,7 @@ pub fn run_synthetic_benchmark() {
     );
     let _ = fs::remove_dir_all(root);
     println!("Synthetic benchmark finished and cleaned up.");
+    Ok(())
 }
 
 /// Recursively count files and directories, updating progress bar.
@@ -63,7 +66,7 @@ pub fn count_files_dirs(
     pb: &indicatif::ProgressBar,
     active_tasks: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
     max_tasks: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
-) {
+) -> Result<()> {
     use std::fs;
     use std::sync::atomic::Ordering;
     if let Ok(entries) = fs::read_dir(root) {
@@ -86,7 +89,7 @@ pub fn count_files_dirs(
                     s.spawn(move |_| {
                         let cur = active_tasks.fetch_add(1, Ordering::SeqCst) + 1;
                         max_tasks.fetch_max(cur, Ordering::SeqCst);
-                        count_files_dirs(
+                        let _ = count_files_dirs(
                             &path,
                             &file_count,
                             &dir_count,
@@ -107,6 +110,7 @@ pub fn count_files_dirs(
             }
         });
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -119,7 +123,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_count_files_dirs_simple() {
+    fn test_count_files_dirs_simple() -> crate::Result<()> {
         let dir = tempdir().unwrap();
         let subdir = dir.path().join("sub");
         fs::create_dir(&subdir).unwrap();
@@ -137,8 +141,9 @@ mod tests {
             &pb,
             &active_tasks,
             &max_tasks,
-        );
+        )?;
         assert_eq!(file_count.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(dir_count.load(std::sync::atomic::Ordering::SeqCst), 1); // only the subdir is counted
+        Ok(())
     }
 }

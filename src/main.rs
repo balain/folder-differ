@@ -1,14 +1,12 @@
-mod diff;
-mod hash;
-mod progress;
-mod sync;
-
-use folder_differ::get_dir_files_with_ignore;
+use folder_differ::{diff, hash, sync, progress, get_dir_files_with_ignore, FolderDifferError, Result};
+use anyhow::Result as AnyResult;
+use ctrlc;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::{self, File, Metadata};
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::process;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -31,11 +29,18 @@ fn print_usage(program: &str) {
     println!("  --help                   Show this help message");
 }
 
-fn main() {
+fn main() -> AnyResult<()> {
+    // Install Ctrl+C handler
+    ctrlc::set_handler(move || {
+        eprintln!("\n[INFO] Caught Ctrl+C (SIGINT). Exiting gracefully...");
+        process::exit(130);
+    })
+    .expect("Error setting Ctrl+C handler");
+
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_usage(&args[0]);
-        return;
+        return Ok(());
     }
     // Thread count CLI option
     let mut thread_count: Option<usize> = None;
@@ -77,8 +82,8 @@ fn main() {
     eprintln!("[CONFIG] Using {} threads for Rayon pool", num_threads);
 
     if args.contains(&"--synthetic-benchmark".to_string()) {
-        progress::run_synthetic_benchmark();
-        return;
+        progress::run_synthetic_benchmark()?;
+        return Ok(());
     }
     let do_sync = args.contains(&"--sync".to_string());
     let dry_run = args.contains(&"--dry-run".to_string());
@@ -91,9 +96,9 @@ fn main() {
         .and_then(|n| n.to_str())
         .unwrap_or("right");
     let output_dir = Path::new("./output");
-    std::fs::create_dir_all(output_dir).ok();
+    std::fs::create_dir_all(output_dir)?;
     let output_path = output_dir.join(format!("{}_vs_{}.txt", left_name, right_name));
-    let output_file = File::create(&output_path).expect("Failed to create output file");
+    let output_file = File::create(&output_path)?;
     let mut writer = BufWriter::new(output_file);
 
     // Timing: start
@@ -122,6 +127,7 @@ fn main() {
                 &left_active_tasks,
                 &left_max_tasks,
             )
+            .unwrap()
         },
         || {
             progress::count_files_dirs(
@@ -132,6 +138,7 @@ fn main() {
                 &right_active_tasks,
                 &right_max_tasks,
             )
+            .unwrap()
         },
     );
     eprintln!(
@@ -264,9 +271,7 @@ fn main() {
                                 if left_size < 1024 {
                                     let left_path = left.join(*path);
                                     let right_path = right.join(*path);
-                                    if let Some(are_equal) =
-                                        hash::compare_small_files(&left_path, &right_path)
-                                    {
+                                    if let Ok(are_equal) = hash::compare_small_files(&left_path, &right_path) {
                                         if !are_equal {
                                             Some(diff::Diff {
                                                 path: (*path).clone(),
@@ -286,16 +291,20 @@ fn main() {
                                 } else {
                                     let left_hash = hash::hash_file(&left.join(*path));
                                     let right_hash = hash::hash_file(&right.join(*path));
-                                    if left_hash != right_hash {
-                                        Some(diff::Diff {
-                                            path: (*path).clone(),
-                                            diff_type: diff::DiffType::Different {
-                                                left_size,
-                                                right_size,
-                                                left_time,
-                                                right_time,
-                                            },
-                                        })
+                                    if let (Ok(left_hash), Ok(right_hash)) = (left_hash, right_hash) {
+                                        if left_hash != right_hash {
+                                            Some(diff::Diff {
+                                                path: (*path).clone(),
+                                                diff_type: diff::DiffType::Different {
+                                                    left_size,
+                                                    right_size,
+                                                    left_time,
+                                                    right_time,
+                                                },
+                                            })
+                                        } else {
+                                            None
+                                        }
                                     } else {
                                         None
                                     }
@@ -345,4 +354,5 @@ fn main() {
 
     let total_time = total_start.elapsed();
     eprintln!("[BENCH] Total duration: {:.2?}", total_time);
+    Ok(())
 }
