@@ -1,16 +1,15 @@
 use anyhow::Result as AnyResult;
 use ctrlc;
 use folder_differ::{
-    FolderDifferError, Result, diff, get_dir_files_with_ignore, hash, progress, sync,
+    diff, hash, progress,
 };
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::fs::{self, File, Metadata};
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process;
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -104,7 +103,7 @@ fn main() -> AnyResult<()> {
     std::fs::create_dir_all(output_dir)?;
     let output_path = output_dir.join(format!("{}_vs_{}.txt", left_name, right_name));
     let output_file = File::create(&output_path)?;
-    let mut writer = BufWriter::new(output_file);
+    let writer = BufWriter::new(output_file);
 
     // Timing: start
     let total_start = Instant::now();
