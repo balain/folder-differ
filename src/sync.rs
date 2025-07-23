@@ -1,10 +1,10 @@
 //! Synchronization actions, logging, and rollback for folder-differ
 
-use std::time::SystemTime;
-use std::path::{Path, PathBuf};
-use std::fs::{OpenOptions};
-use std::io::Write;
 use crate::diff::{Diff, DiffType};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Represents an action to synchronize files between directories.
 #[derive(Debug, Clone)]
@@ -39,11 +39,14 @@ pub struct SyncState {
 
 /// Plan sync actions based on diffs and sync mode.
 pub fn plan_sync_actions(diffs: &[Diff], _sync_mode: &str) -> Vec<SyncAction> {
-    diffs.iter().map(|diff| match &diff.diff_type {
-        DiffType::OnlyInLeft => SyncAction::CopyLeftToRight(diff.path.clone()),
-        DiffType::OnlyInRight => SyncAction::CopyRightToLeft(diff.path.clone()),
-        DiffType::Different { .. } => SyncAction::CopyLeftToRight(diff.path.clone()),
-    }).collect()
+    diffs
+        .iter()
+        .map(|diff| match &diff.diff_type {
+            DiffType::OnlyInLeft => SyncAction::CopyLeftToRight(diff.path.clone()),
+            DiffType::OnlyInRight => SyncAction::CopyRightToLeft(diff.path.clone()),
+            DiffType::Different { .. } => SyncAction::CopyLeftToRight(diff.path.clone()),
+        })
+        .collect()
 }
 
 /// Log a sync action.
@@ -60,7 +63,11 @@ pub fn save_sync_log(log: &SyncLog, path: &Path) {
     let log_path = path.join(".sync-log.txt");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         for entry in &log.entries {
-            let _ = writeln!(file, "{:?} at {:?}: {}", entry.action, entry.timestamp, entry.details);
+            let _ = writeln!(
+                file,
+                "{:?} at {:?}: {}",
+                entry.action, entry.timestamp, entry.details
+            );
         }
     }
 }
@@ -99,7 +106,9 @@ pub fn perform_sync_action(action: &SyncAction, left: &Path, right: &Path, log: 
         SyncAction::CopyLeftToRight(rel_path) => {
             let src = left.join(rel_path);
             let dst = right.join(rel_path);
-            if let Some(parent) = dst.parent() { let _ = std::fs::create_dir_all(parent); }
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let backup = backup_file(&dst);
             let res = std::fs::copy(&src, &dst);
             let msg = if let Ok(_) = res {
@@ -112,7 +121,9 @@ pub fn perform_sync_action(action: &SyncAction, left: &Path, right: &Path, log: 
         SyncAction::CopyRightToLeft(rel_path) => {
             let src = right.join(rel_path);
             let dst = left.join(rel_path);
-            if let Some(parent) = dst.parent() { let _ = std::fs::create_dir_all(parent); }
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let backup = backup_file(&dst);
             let res = std::fs::copy(&src, &dst);
             let msg = if let Ok(_) = res {
@@ -202,4 +213,4 @@ pub fn rollback(log: &SyncLog, left: &Path, right: &Path) {
             }
         }
     }
-} 
+}

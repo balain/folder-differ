@@ -2,12 +2,16 @@
 //!
 //! This crate provides modules for directory diffing, file hashing, synchronization actions, and progress reporting.
 
+use rustc_hash::FxHashMap;
 use std::fs::Metadata;
 use std::path::Path;
-use rustc_hash::FxHashMap;
 
 /// Utility function for directory walking with ignore patterns.
-pub fn get_dir_files_with_ignore(root: &Path, files: &mut FxHashMap<String, Metadata>, ignore_patterns: &[String]) {
+pub fn get_dir_files_with_ignore(
+    root: &Path,
+    files: &mut FxHashMap<String, Metadata>,
+    ignore_patterns: &[String],
+) {
     use ignore::WalkBuilder;
     let mut builder = WalkBuilder::new(root);
     for pat in ignore_patterns {
@@ -29,17 +33,17 @@ pub fn get_dir_files_with_ignore(root: &Path, files: &mut FxHashMap<String, Meta
 }
 
 pub mod diff;
-pub mod sync;
 pub mod hash;
 pub mod progress;
+pub mod sync;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use rustc_hash::FxHashMap;
     use std::fs::File;
     use std::io::Write;
-    use rustc_hash::FxHashMap;
+    use tempfile::tempdir;
 
     #[test]
     fn test_get_dir_files_with_ignore_basic() {
@@ -51,4 +55,4 @@ mod tests {
         get_dir_files_with_ignore(dir.path(), &mut files, &[]);
         assert!(files.contains_key("foo.txt"));
     }
-} 
+}
