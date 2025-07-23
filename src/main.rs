@@ -1,6 +1,7 @@
 use anyhow::Result as AnyResult;
 use ctrlc;
 use folder_differ::{diff, hash, progress};
+#[cfg(feature = "progress")]
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use log::{debug, info, warn};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -83,13 +84,25 @@ fn main() -> AnyResult<()> {
         .unwrap();
     info!("Using {} threads for Rayon pool", num_threads);
 
+    #[cfg(feature = "benchmarking")]
     if args.contains(&"--synthetic-benchmark".to_string()) {
         progress::run_synthetic_benchmark()?;
         return Ok(());
     }
+    #[cfg(not(feature = "benchmarking"))]
+    if args.contains(&"--synthetic-benchmark".to_string()) {
+        eprintln!("Synthetic benchmarking is not enabled in this build.");
+        std::process::exit(1);
+    }
+    #[cfg(feature = "sync")]
     let do_sync = args.contains(&"--sync".to_string());
-    let dry_run = args.contains(&"--dry-run".to_string());
+    #[cfg(not(feature = "sync"))]
+    let do_sync = false;
+    #[cfg(feature = "sync")]
     let do_rollback = args.contains(&"--rollback".to_string());
+    #[cfg(not(feature = "sync"))]
+    let do_rollback = false;
+    let dry_run = args.contains(&"--dry-run".to_string());
 
     // Output file logic
     let left_name = left.file_name().and_then(|n| n.to_str()).unwrap_or("left");
@@ -108,7 +121,10 @@ fn main() -> AnyResult<()> {
 
     // PHASE 1: Count files and directories (with progress bar)
     let scan_start = Instant::now();
+    #[cfg(feature = "progress")]
     let count_pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    #[cfg(not(feature = "progress"))]
+    let count_pb = ();
     count_pb.set_style(ProgressStyle::with_template("[Counting {elapsed_precise}] {msg}").unwrap());
     use std::sync::atomic::{AtomicUsize, Ordering};
     let left_file_count = Arc::new(AtomicUsize::new(0));
@@ -164,7 +180,10 @@ fn main() -> AnyResult<()> {
     let right_total =
         right_file_count.load(Ordering::SeqCst) + right_dir_count.load(Ordering::SeqCst);
     let phase2_start = Instant::now();
+    #[cfg(feature = "progress")]
     let left_scan_pb = ProgressBar::new(left_total as u64);
+    #[cfg(not(feature = "progress"))]
+    let left_scan_pb = ();
     left_scan_pb.set_style(
         ProgressStyle::with_template(
             "[Left {elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% {msg}",
@@ -185,12 +204,17 @@ fn main() -> AnyResult<()> {
                     left_files.insert(rel_path, meta);
                 }
             }
+            #[cfg(feature = "progress")]
             left_scan_pb.inc(1);
         }
     }
+    #[cfg(feature = "progress")]
     left_scan_pb.finish_with_message("Left scan complete");
 
+    #[cfg(feature = "progress")]
     let right_scan_pb = ProgressBar::new(right_total as u64);
+    #[cfg(not(feature = "progress"))]
+    let right_scan_pb = ();
     right_scan_pb.set_style(
         ProgressStyle::with_template(
             "[Right {elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% {msg}",
@@ -211,9 +235,11 @@ fn main() -> AnyResult<()> {
                     right_files.insert(rel_path, meta);
                 }
             }
+            #[cfg(feature = "progress")]
             right_scan_pb.inc(1);
         }
     }
+    #[cfg(feature = "progress")]
     right_scan_pb.finish_with_message("Right scan complete");
     let phase2_time = phase2_start.elapsed();
     info!("Phase 2 (scanning) duration: {:.2?}", phase2_time);
@@ -230,7 +256,10 @@ fn main() -> AnyResult<()> {
     info!("Processing {} files in parallel...", total_files);
     let chunk_size = 1000;
     let paths_vec: Vec<_> = all_paths.into_iter().collect();
+    #[cfg(feature = "progress")]
     let pb = ProgressBar::new(total_files as u64);
+    #[cfg(not(feature = "progress"))]
+    let pb = ();
     pb.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {percent}% ETA:{eta}",
@@ -335,6 +364,7 @@ fn main() -> AnyResult<()> {
                         local_buf.push(format!("Diff: {:?}", diff));
                         total_diffs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
+                    #[cfg(feature = "progress")]
                     pb.inc(1);
                 }
                 if !local_buf.is_empty() {
@@ -346,6 +376,7 @@ fn main() -> AnyResult<()> {
             });
         });
     });
+    #[cfg(feature = "progress")]
     pb.finish_with_message("Diff calculation and output complete");
     let phase3_time = phase3_start.elapsed();
     info!("Phase 3 (diffing) duration: {:.2?}", phase3_time);

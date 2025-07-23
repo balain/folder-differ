@@ -1,11 +1,12 @@
 //! Progress bar and benchmarking utilities for folder-differ
 
 use crate::Result;
+#[cfg(feature = "progress")]
 use indicatif::ProgressBar;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
-/// Run a synthetic benchmark by creating and scanning a large fake tree.
+#[cfg(feature = "benchmarking")]
 pub fn run_synthetic_benchmark() -> Result<()> {
     use std::fs;
     use std::sync::Arc;
@@ -57,7 +58,7 @@ pub fn run_synthetic_benchmark() -> Result<()> {
     Ok(())
 }
 
-/// Recursively count files and directories, updating progress bar.
+#[cfg(feature = "progress")]
 pub fn count_files_dirs(
     root: &Path,
     file_count: &std::sync::Arc<AtomicUsize>,
@@ -115,6 +116,7 @@ pub fn count_files_dirs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "progress")]
     use indicatif::ProgressBar;
     use std::fs;
     use std::sync::Arc;
@@ -133,6 +135,7 @@ mod tests {
         let active_tasks = Arc::new(AtomicUsize::new(1));
         let max_tasks = Arc::new(AtomicUsize::new(1));
         let pb = ProgressBar::hidden();
+        #[cfg(feature = "progress")]
         count_files_dirs(
             dir.path(),
             &file_count,

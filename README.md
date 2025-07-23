@@ -105,3 +105,25 @@ folder-differ /path/to/dirA /path/to/dirB --threads 32
 
 ## License
 MIT 
+
+## Cargo Features
+
+This crate supports optional features to enable or disable certain functionality at build time:
+
+- `progress` (default): Enables progress bars and related UI (requires `indicatif`).
+- `benchmarking`: Enables the synthetic benchmarking mode (`--synthetic-benchmark`).
+- `sync`: Enables directory sync and rollback functionality (`--sync`, `--rollback`).
+
+To build without progress bars:
+
+```
+cargo build --no-default-features
+```
+
+To enable benchmarking or sync support:
+
+```
+cargo build --features="benchmarking sync"
+```
+
+You can combine features as needed. By default, only `progress` is enabled. 

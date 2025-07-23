@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 sha2 = "0.10"
 rayon = "1.10"
-indicatif = "0.17"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memmap2 = "0.9"
 blake3 = "1.5"
@@ -20,6 +19,14 @@ anyhow = "1.0.98"
 log = "0.4.27"
 env_logger = "0.11.8"
 
+# Optional dependencies
+indicatif = { version = "0.17", optional = true }
+
+[features]
+default = ["progress"]
+progress = ["indicatif"]
+benchmarking = []
+sync = []
 
 [profile.release]
 opt-level = 3     # Optimize for size.
