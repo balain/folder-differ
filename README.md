@@ -5,6 +5,9 @@ A high-performance, parallel, and robust directory comparison and sync tool writ
 Developed using Windsurf and Cursor.
 
 ## Features
+- **Modular architecture**: Core logic is implemented as a reusable library crate (`lib.rs`), with a minimal binary (`main.rs`).
+- **Structured error handling**: All fallible operations use idiomatic `Result<T, E>` with custom error types, powered by [`thiserror`](https://crates.io/crates/thiserror) and [`anyhow`](https://crates.io/crates/anyhow) for robust CLI error reporting.
+- **Structured, configurable logging**: Uses [`log`](https://crates.io/crates/log) and [`env_logger`](https://crates.io/crates/env_logger) for info, warning, and error output. Logging is configurable via the `RUST_LOG` environment variable.
 - **Parallel directory scanning** with jwalk for both trees
 - **Efficient file comparison** using size, modification time, and fast hashing (BLAKE3)
 - **Hash sampling for huge files**: only the first and last 64KB are hashed for files >100MB
@@ -19,6 +22,8 @@ Developed using Windsurf and Cursor.
 - **Configurable parallelism**: set thread count via CLI
 - **Ignore patterns**: skip files/folders by pattern (basic substring, can be extended)
 - **Help/usage output**: `--help` for all options
+- **Comprehensive test harness**: Unit and integration tests for all major modules, using [`tempfile`](https://crates.io/crates/tempfile) for isolated test directories/files.
+- **Graceful shutdown**: Handles Ctrl+C (SIGINT) for safe interruption.
 
 ## Usage
 
@@ -37,6 +42,17 @@ folder-differ <left_dir> <right_dir> [--threads N] [--sync] [--dry-run] [--rollb
 - `--rollback`              : Roll back the last sync operation using backups
 - `--synthetic-benchmark`   : Run a synthetic benchmark (creates and scans a large fake tree)
 - `--help`                  : Show help/usage message
+
+### Logging
+
+This tool uses structured, configurable logging. To control log verbosity, set the `RUST_LOG` environment variable. For example:
+
+```
+RUST_LOG=info folder-differ ...
+RUST_LOG=debug folder-differ ...
+```
+
+Log output includes info, warning, and error messages for all major phases and error conditions.
 
 ## How It Works
 
@@ -77,6 +93,12 @@ folder-differ /path/to/dirA /path/to/dirB --threads 32
 - [`rustc-hash`](https://crates.io/crates/rustc-hash) (fast hash maps/sets)
 - [`ignore`](https://crates.io/crates/ignore) (ignore pattern support, can be extended)
 - [`num_cpus`](https://crates.io/crates/num_cpus) (CPU count for thread pool)
+- [`thiserror`](https://crates.io/crates/thiserror) (custom error types)
+- [`anyhow`](https://crates.io/crates/anyhow) (ergonomic error handling in CLI)
+- [`log`](https://crates.io/crates/log) (structured logging)
+- [`env_logger`](https://crates.io/crates/env_logger) (configurable logging backend)
+- [`tempfile`](https://crates.io/crates/tempfile) (test harness)
+- [`ctrlc`](https://crates.io/crates/ctrlc) (graceful shutdown)
 
 ## Requirements
 - Rust (edition 2024)

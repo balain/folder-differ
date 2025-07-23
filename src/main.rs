@@ -2,6 +2,7 @@ use folder_differ::{diff, hash, sync, progress, get_dir_files_with_ignore, Folde
 use anyhow::Result as AnyResult;
 use ctrlc;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use log::{info, warn, error, debug};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::{self, File, Metadata};
 use std::io::{BufWriter, Write};
@@ -30,9 +31,11 @@ fn print_usage(program: &str) {
 }
 
 fn main() -> AnyResult<()> {
+    // Initialize logger
+    env_logger::init();
     // Install Ctrl+C handler
     ctrlc::set_handler(move || {
-        eprintln!("\n[INFO] Caught Ctrl+C (SIGINT). Exiting gracefully...");
+        warn!("Caught Ctrl+C (SIGINT). Exiting gracefully...");
         process::exit(130);
     })
     .expect("Error setting Ctrl+C handler");
@@ -79,7 +82,7 @@ fn main() -> AnyResult<()> {
         .num_threads(num_threads)
         .build_global()
         .unwrap();
-    eprintln!("[CONFIG] Using {} threads for Rayon pool", num_threads);
+    info!("Using {} threads for Rayon pool", num_threads);
 
     if args.contains(&"--synthetic-benchmark".to_string()) {
         progress::run_synthetic_benchmark()?;
@@ -141,12 +144,12 @@ fn main() -> AnyResult<()> {
             .unwrap()
         },
     );
-    eprintln!(
-        "[DIAG] Max parallel tasks (left): {}",
+    debug!(
+        "Max parallel tasks (left): {}",
         left_max_tasks.load(Ordering::SeqCst)
     );
-    eprintln!(
-        "[DIAG] Max parallel tasks (right): {}",
+    debug!(
+        "Max parallel tasks (right): {}",
         right_max_tasks.load(Ordering::SeqCst)
     );
     let file_total =
@@ -155,7 +158,7 @@ fn main() -> AnyResult<()> {
     count_pb.finish_with_message("Counting complete");
     let scan_total = file_total + dir_total;
     let phase1_time = scan_start.elapsed();
-    eprintln!("[BENCH] Phase 1 (counting) duration: {:.2?}", phase1_time);
+    info!("Phase 1 (counting) duration: {:.2?}", phase1_time);
 
     // PHASE 2: Scan with percent-complete progress bar using jwalk
     let left_total = left_file_count.load(Ordering::SeqCst) + left_dir_count.load(Ordering::SeqCst);
@@ -214,18 +217,18 @@ fn main() -> AnyResult<()> {
     }
     right_scan_pb.finish_with_message("Right scan complete");
     let phase2_time = phase2_start.elapsed();
-    eprintln!("[BENCH] Phase 2 (scanning) duration: {:.2?}", phase2_time);
+    info!("Phase 2 (scanning) duration: {:.2?}", phase2_time);
 
     // PHASE 3: Diff calculation and output
     let phase3_start = Instant::now();
-    println!("About to start diff calculation...");
+    info!("About to start diff calculation...");
     let writer = Arc::new(Mutex::new(writer));
     let all_only_in_left = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let processed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let total_diffs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let all_paths: FxHashSet<_> = left_files.keys().chain(right_files.keys()).collect();
     let total_files = all_paths.len();
-    println!("Processing {} files in parallel...", total_files);
+    info!("Processing {} files in parallel...", total_files);
     let chunk_size = 1000;
     let paths_vec: Vec<_> = all_paths.into_iter().collect();
     let pb = ProgressBar::new(total_files as u64);
@@ -343,16 +346,16 @@ fn main() -> AnyResult<()> {
     });
     pb.finish_with_message("Diff calculation and output complete");
     let phase3_time = phase3_start.elapsed();
-    eprintln!("[BENCH] Phase 3 (diffing) duration: {:.2?}", phase3_time);
+    info!("Phase 3 (diffing) duration: {:.2?}", phase3_time);
     let total_diffs = total_diffs.load(std::sync::atomic::Ordering::SeqCst);
     {
         let mut w = writer.lock().unwrap();
         writeln!(w, "Total differences found: {}", total_diffs).ok();
         w.flush().ok();
     }
-    println!("Output written to {}", output_path.display());
+    info!("Output written to {}", output_path.display());
 
     let total_time = total_start.elapsed();
-    eprintln!("[BENCH] Total duration: {:.2?}", total_time);
+    info!("Total duration: {:.2?}", total_time);
     Ok(())
 }

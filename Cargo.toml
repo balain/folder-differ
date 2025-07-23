@@ -17,6 +17,8 @@ jwalk = "0.8"
 ctrlc = "3.4.7"
 thiserror = "2.0.12"
 anyhow = "1.0.98"
+log = "0.4.27"
+env_logger = "0.11.8"
 
 
 [profile.release]
