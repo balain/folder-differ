@@ -1,8 +1,8 @@
 //! Synchronization actions, logging, and rollback for folder-differ
 
-use crate::diff::{Diff, DiffType};
 use crate::FolderDifferError;
 use crate::Result;
+use crate::diff::{Diff, DiffType};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -1,8 +1,10 @@
-use folder_differ::{diff, hash, sync, progress, get_dir_files_with_ignore, FolderDifferError, Result};
 use anyhow::Result as AnyResult;
 use ctrlc;
+use folder_differ::{
+    FolderDifferError, Result, diff, get_dir_files_with_ignore, hash, progress, sync,
+};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use log::{info, warn, error, debug};
+use log::{debug, error, info, warn};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::{self, File, Metadata};
 use std::io::{BufWriter, Write};
@@ -274,7 +276,9 @@ fn main() -> AnyResult<()> {
                                 if left_size < 1024 {
                                     let left_path = left.join(*path);
                                     let right_path = right.join(*path);
-                                    if let Ok(are_equal) = hash::compare_small_files(&left_path, &right_path) {
+                                    if let Ok(are_equal) =
+                                        hash::compare_small_files(&left_path, &right_path)
+                                    {
                                         if !are_equal {
                                             Some(diff::Diff {
                                                 path: (*path).clone(),
@@ -294,7 +298,8 @@ fn main() -> AnyResult<()> {
                                 } else {
                                     let left_hash = hash::hash_file(&left.join(*path));
                                     let right_hash = hash::hash_file(&right.join(*path));
-                                    if let (Ok(left_hash), Ok(right_hash)) = (left_hash, right_hash) {
+                                    if let (Ok(left_hash), Ok(right_hash)) = (left_hash, right_hash)
+                                    {
                                         if left_hash != right_hash {
                                             Some(diff::Diff {
                                                 path: (*path).clone(),

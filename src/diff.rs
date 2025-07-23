@@ -49,70 +49,72 @@ pub fn compare_dirs(left: &Path, right: &Path) -> Result<Vec<Diff>> {
     let all_paths: FxHashSet<_> = left_files.keys().chain(right_files.keys()).collect();
     let diffs: Vec<Diff> = all_paths
         .par_iter()
-        .map(|path| match (left_files.get(*path), right_files.get(*path)) {
-            (Some(left_meta), Some(right_meta)) => {
-                let left_size = left_meta.len();
-                let right_size = right_meta.len();
-                let left_time = left_meta.modified().ok();
-                let right_time = right_meta.modified().ok();
-                if left_size != right_size {
-                    Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
-                        path: (*path).clone(),
-                        diff_type: DiffType::Different {
-                            left_size,
-                            right_size,
-                            left_time,
-                            right_time,
-                        },
-                    }))
-                } else if left_time != right_time {
-                    let left_path = left.join(*path);
-                    let right_path = right.join(*path);
-                    if left_size < 1024 {
-                        if compare_small_files(&left_path, &right_path)? == false {
-                            Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
-                                path: (*path).clone(),
-                                diff_type: DiffType::Different {
-                                    left_size,
-                                    right_size,
-                                    left_time,
-                                    right_time,
-                                },
-                            }))
+        .map(
+            |path| match (left_files.get(*path), right_files.get(*path)) {
+                (Some(left_meta), Some(right_meta)) => {
+                    let left_size = left_meta.len();
+                    let right_size = right_meta.len();
+                    let left_time = left_meta.modified().ok();
+                    let right_time = right_meta.modified().ok();
+                    if left_size != right_size {
+                        Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
+                            path: (*path).clone(),
+                            diff_type: DiffType::Different {
+                                left_size,
+                                right_size,
+                                left_time,
+                                right_time,
+                            },
+                        }))
+                    } else if left_time != right_time {
+                        let left_path = left.join(*path);
+                        let right_path = right.join(*path);
+                        if left_size < 1024 {
+                            if compare_small_files(&left_path, &right_path)? == false {
+                                Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
+                                    path: (*path).clone(),
+                                    diff_type: DiffType::Different {
+                                        left_size,
+                                        right_size,
+                                        left_time,
+                                        right_time,
+                                    },
+                                }))
+                            } else {
+                                Ok::<Option<Diff>, FolderDifferError>(None)
+                            }
                         } else {
-                            Ok::<Option<Diff>, FolderDifferError>(None)
+                            let left_hash = hash_file(&left_path)?;
+                            let right_hash = hash_file(&right_path)?;
+                            if left_hash != right_hash {
+                                Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
+                                    path: (*path).clone(),
+                                    diff_type: DiffType::Different {
+                                        left_size,
+                                        right_size,
+                                        left_time,
+                                        right_time,
+                                    },
+                                }))
+                            } else {
+                                Ok::<Option<Diff>, FolderDifferError>(None)
+                            }
                         }
                     } else {
-                        let left_hash = hash_file(&left_path)?;
-                        let right_hash = hash_file(&right_path)?;
-                        if left_hash != right_hash {
-                            Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
-                                path: (*path).clone(),
-                                diff_type: DiffType::Different {
-                                    left_size,
-                                    right_size,
-                                    left_time,
-                                    right_time,
-                                },
-                            }))
-                        } else {
-                            Ok::<Option<Diff>, FolderDifferError>(None)
-                        }
+                        Ok::<Option<Diff>, FolderDifferError>(None)
                     }
-                } else {
-                    Ok::<Option<Diff>, FolderDifferError>(None)
                 }
-            }
-            (Some(_), None) => Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
-                path: (*path).clone(),
-                diff_type: DiffType::OnlyInLeft,
-            })),
-            (None, Some(_)) => Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
-                path: (*path).clone(),
-                diff_type: DiffType::OnlyInRight,
-            })),
-            (None, None) => Ok::<Option<Diff>, FolderDifferError>(None),
-        })
+                (Some(_), None) => Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
+                    path: (*path).clone(),
+                    diff_type: DiffType::OnlyInLeft,
+                })),
+                (None, Some(_)) => Ok::<Option<Diff>, FolderDifferError>(Some(Diff {
+                    path: (*path).clone(),
+                    diff_type: DiffType::OnlyInRight,
+                })),
+                (None, None) => Ok::<Option<Diff>, FolderDifferError>(None),
+            },
+        )
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -164,6 +166,9 @@ mod tests {
 
         let diffs = super::compare_dirs(dir1.path(), dir2.path()).unwrap();
         assert_eq!(diffs.len(), 1);
-        assert!(matches!(diffs[0].diff_type, super::DiffType::Different { .. }));
+        assert!(matches!(
+            diffs[0].diff_type,
+            super::DiffType::Different { .. }
+        ));
     }
 }

@@ -4,13 +4,13 @@
 
 pub mod diff;
 pub mod hash;
-pub mod sync;
 pub mod progress;
+pub mod sync;
 
-use thiserror::Error;
 use rustc_hash::FxHashMap;
 use std::fs::Metadata;
 use std::path::Path;
+use thiserror::Error;
 
 /// The error type for all folder-differ library operations.
 #[derive(Debug, Error)]

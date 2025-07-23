@@ -25,5 +25,8 @@ fn integration_file_only_in_left() {
     write_file(&dir1.path().join("a.txt"), b"hello");
     let diffs = compare_dirs(dir1.path(), dir2.path()).unwrap();
     assert_eq!(diffs.len(), 1);
-    assert!(matches!(diffs[0].diff_type, folder_differ::diff::DiffType::OnlyInLeft));
+    assert!(matches!(
+        diffs[0].diff_type,
+        folder_differ::diff::DiffType::OnlyInLeft
+    ));
 }
